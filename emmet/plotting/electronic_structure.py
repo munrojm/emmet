@@ -5,15 +5,14 @@ from pydash.objects import get
 from pymatgen.electronic_structure.bandstructure import BandStructureSymmLine, BandStructure
 from pymatgen.symmetry.bandstructure import HighSymmKpath
 from pymatgen.electronic_structure.dos import CompleteDos
-from sumo.plotting.dos_plotter import SDOSPlotter
-from sumo.plotting.bs_plotter import SBSPlotter
-from sumo.electronic_structure.dos import get_pdos
+
+from emmet.plotting.utils import BSPlotterPlotly
 
 __author__ = "Shyam Dwaraknath <shyamd@lbl.gov>"
 
 
 class ElectronicStructureImageBuilder(Builder):
-    def __init__(self, materials, electronic_structure, bandstructures, dos, query=None, plot_options=None, **kwargs):
+    def __init__(self, materials, electronic_structure, bandstructures, dos, query=None, **kwargs):
         """
         Creates an electronic structure from a tasks collection, the associated band structures and density of states, and the materials structure
 
@@ -23,7 +22,6 @@ class ElectronicStructureImageBuilder(Builder):
         electronic_structure  (Store) : Store of electronic structure documents
         bandstructures (Store) : store of bandstructures
         dos (Store) : store of DOS
-        plot_options (dict): options to pass to the sumo SBSPlotter
         query (dict): dictionary to limit tasks to be analyzed
         """
 
@@ -32,9 +30,8 @@ class ElectronicStructureImageBuilder(Builder):
         self.bandstructures = bandstructures
         self.dos = dos
         self.query = query if query else {}
-        self.plot_options = plot_options if plot_options else {}
 
-        super().__init__(sources=[materials, bandstructures, dos], targets=[electronic_structure], **kwargs)
+        super().__init__(sources=[materials, bandstructures, dos], targets=[electronic_structure])
 
     def get_items(self):
         """
@@ -65,8 +62,10 @@ class ElectronicStructureImageBuilder(Builder):
         self.total = len(mats)
 
         for m in mats:
-            mat = self.materials.query_one([self.materials.key, "structure", "bandstructure", "inputs"],
-                                           {self.materials.key: m})
+
+            mat = self.materials.query_one(properties=[self.materials.key, "structure", "bandstructure", "inputs"],
+                                           criteria={self.materials.key: m})
+            
             mat["bandstructure"]["bs"] = self.bandstructures.query_one(
                 criteria={"task_id": get(mat, "bandstructure.bs_task")})
 
@@ -86,30 +85,22 @@ class ElectronicStructureImageBuilder(Builder):
         d = {self.electronic_structure.key: mat[self.materials.key]}
         self.logger.info("Processing: {}".format(mat[self.materials.key]))
 
-        bs = build_bs(mat["bandstructure"]["bs"], mat)
+        bs_all = BandStructureSymmLine.from_dict(mat["bandstructure"]["bs"])
         dos = CompleteDos.from_dict(mat["bandstructure"]["dos"])
 
-        if bs and dos:
+        if bs_all and dos:
             try:
-                pdos = get_pdos(dos)
-                dos_plotter = SDOSPlotter(dos, pdos)
-                bs_plotter = SBSPlotter(bs)
-                plt = bs_plotter.get_plot(dos_plotter=dos_plotter, **self.plot_options)
-                d["plot"] = image_from_plot(plt)
-                plt.close()
+                for path_type in ['sc', 'lm', 'hin']:
+                    bs_dos_plotter = BSPlotterPlotly(bs_all, dos, path_type)
+                    plt = bs_dos_plotter.get_plotly_plot(smooth=False, continuous=False)
+                    d["bs_{}".format(path_type)] = bs_dos_plotter._bs
+                    d["plot_{}".format(path_type)] = plt.to_image(format='png')
+                    d["plot_dict_{}".format(path_type)] = plt.to_dict()
+                    plt.close()
             except Exception:
                 traceback.print_exc()
                 self.logger.warning("Caught error in bandstructure plotting for {}: {}".format(
                     mat[self.materials.key], traceback.format_exc()))
-
-        # Reduced Band structure plot
-        try:
-            gap = bs.get_band_gap()["energy"]
-            plot_data = bs_plotter.bs_plot_data()
-            d["bs_plot_small"] = get_small_plot(plot_data, gap)
-        except Exception:
-            self.logger.warning("Caught error in generating reduced bandstructure plot for {}: {}".format(
-                mat[self.materials.key], traceback.format_exc()))
 
         # Store task_ids
         for k in ["bs_task", "dos_task", "uniform_task"]:
@@ -134,27 +125,6 @@ class ElectronicStructureImageBuilder(Builder):
             self.logger.info("No electronic structure docs to update")
 
 
-def get_small_plot(plot_data, gap):
-    for branch in plot_data['energy']:
-        for spin, v in branch.items():
-            new_bands = []
-            for band in v:
-                if min(band) < gap + 3 and max(band) > -3:
-                    new_bands.append(band)
-                else:
-                    new_bands.append([])
-            branch[spin] = new_bands
-    return plot_data
-
-
-def image_from_plot(plot):
-    imgdata = io.BytesIO()
-    plot.tight_layout()
-    plot.savefig(imgdata, format="png", dpi=100)
-    plot_img = imgdata.getvalue()
-    return plot_img
-
-
 def build_bs(bs_dict, mat):
 
     bs_dict["structure"] = mat["structure"]
@@ -176,3 +146,5 @@ def build_bs(bs_dict, mat):
     bs = BandStructureSymmLine.from_dict(bs_dict)
 
     return bs
+
+
