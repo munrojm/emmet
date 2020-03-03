@@ -1,20 +1,28 @@
 import io
 import traceback
+from datetime import datetime
 from maggma.builders import Builder
-from pydash.objects import get
-from pymatgen.electronic_structure.bandstructure import BandStructureSymmLine, BandStructure
+from pymatgen import Structure
 from pymatgen.symmetry.bandstructure import HighSymmKpath
 from pymatgen.electronic_structure.dos import CompleteDos
+from pymatgen.electronic_structure.bandstructure import BandStructureSymmLine
+from pymatgen.electronic_structure.core import Spin, OrbitalType
+from emmet.vasp.materials import structure_metadata as sm
+import copy
+import numpy as np
 
 from emmet.plotting.utils import BSPlotterPlotly
 
-__author__ = "Shyam Dwaraknath <shyamd@lbl.gov>"
+__author__ = "Jason Munro <jmunro@lbl.gov>"
 
 
-class ElectronicStructureImageBuilder(Builder):
-    def __init__(self, materials, electronic_structure, bandstructures, dos, query=None, **kwargs):
+class BSDOSBuilder(Builder):
+    def __init__(self, tasks, materials, electronic_structure, bandstructures, dos, s3, query=None, **kwargs):
         """
         Creates an electronic structure from a tasks collection, the associated band structures and density of states, and the materials structure
+
+        This explicitly acts on bandstructure documents generated for the 'all' path type in HighSymmKpath.
+        Individual bandstructures for each of the three conventions are generated.
 
         Really only usefull for MP Website infrastructure right now.
 
@@ -22,20 +30,23 @@ class ElectronicStructureImageBuilder(Builder):
         electronic_structure  (Store) : Store of electronic structure documents
         bandstructures (Store) : store of bandstructures
         dos (Store) : store of DOS
+        s3 (Store) : store of AWS S3 bucket
         query (dict): dictionary to limit tasks to be analyzed
         """
 
+        self.tasks = tasks
         self.materials = materials
         self.electronic_structure = electronic_structure
         self.bandstructures = bandstructures
         self.dos = dos
+        self.s3 = s3
         self.query = query if query else {}
 
-        super().__init__(sources=[materials, bandstructures, dos], targets=[electronic_structure])
+        super().__init__(sources=[tasks, materials, bandstructures, dos], targets=[electronic_structure], **kwargs)
 
     def get_items(self):
         """
-        Gets all items to process into materials documents
+        Gets all items to process
 
         Returns:
             generator or list relevant tasks and materials to process into materials documents
@@ -53,7 +64,13 @@ class ElectronicStructureImageBuilder(Builder):
         # get all materials that were updated since the electronic structure was last updated
         # and there is either a dos or bandstructure
         q = dict(self.query)
-        q.update(self.materials.lu_filter(self.electronic_structure))
+        q.update(
+            {
+                self.materials.last_updated_field: {
+                    "$gt": self.materials._lu_func[1](self.electronic_structure.last_updated)
+                }
+            }
+        )
         q["$and"] = [{"bandstructure.bs_task": {"$exists": 1}}, {"bandstructure.dos_task": {"$exists": 1}}]
         mats = set(self.materials.distinct(self.materials.key, criteria=q)) | (set(mat_ids) - set(es_ids))
 
@@ -61,20 +78,200 @@ class ElectronicStructureImageBuilder(Builder):
 
         self.total = len(mats)
 
+        # find bs type for each task in task_type and store each different bs object
         for m in mats:
 
-            mat = self.materials.query_one(properties=[self.materials.key, "structure", "bandstructure", "inputs"],
-                                           criteria={self.materials.key: m})
-            
-            mat["bandstructure"]["bs"] = self.bandstructures.query_one(
-                criteria={"task_id": get(mat, "bandstructure.bs_task")})
+            mat = self.materials.query_one(
+                properties=[self.materials.key, "structure", "inputs", "task_types", self.materials.last_updated_field],
+                criteria={self.materials.key: m},
+            )
+            mat["dos"] = {}
+            mat["bandstructure"] = {"sc": {}, "lm": {}, "hin": {}}
 
-            mat["bandstructure"]["dos"] = self.dos.query_one(criteria={"task_id": get(mat, "bandstructure.dos_task")})
+            seen_bs_data = {"sc": [], "lm": [], "hin": []}
+            seen_dos_data = []
+
+            for task_id in mat["task_types"].keys():
+                # obtain all bs calcs, their type, and last updated
+                if "NSCF Line" in mat["task_types"][task_id]:
+
+                    bs_type = None
+
+                    task_query = self.tasks.query_one(
+                        properties=["last_updated", "input.is_hubbard", "orig_inputs.kpoints"],
+                        criteria={"task_id": int(task_id)},
+                    )
+
+                    bs = self.bandstructures.query_one(criteria={"metadata.task_id": int(task_id)})
+
+                    structure = Structure.from_dict(bs["structure"])
+
+                    bs_labels = bs["labels_dict"]
+
+                    # - Find path type
+                    if any([label.islower() for label in bs_labels]):
+                        bs_type = "lm"
+                    else:
+                        for ptype in ["sc", "hin"]:
+                            hskp = HighSymmKpath(
+                                structure,
+                                has_magmoms=False,
+                                magmom_axis=None,
+                                path_type=ptype,
+                                symprec=0.1,
+                                angle_tolerance=5,
+                                atol=1e-5,
+                            )
+                            hs_labels_full = hskp.kpath["kpoints"]
+                            hs_path_uniq = set([label for segment in hskp.kpath["path"] for label in segment])
+
+                            hs_labels = {k: hs_labels_full[k] for k in hs_path_uniq if k in hs_path_uniq}
+
+                            shared_items = {
+                                k: bs_labels[k]
+                                for k in bs_labels
+                                if k in hs_labels and np.allclose(bs_labels[k], hs_labels[k], atol=1e-3)
+                            }
+
+                            if len(shared_items) == len(bs_labels) and len(shared_items) == len(hs_labels):
+                                bs_type = ptype
+
+                    is_hubbard = task_query["input"]["is_hubbard"]
+                    nkpoints = task_query["orig_inputs"]["kpoints"]["nkpoints"]
+                    lu_dt = task_query["last_updated"]
+
+                    if bs_type is not None:
+                        seen_bs_data[bs_type].append(
+                            {
+                                "task_id": task_id,
+                                "is_hubbard": int(is_hubbard),
+                                "nkpoints": int(nkpoints),
+                                "updated_on": lu_dt,
+                            }
+                        )
+
+                # Handle uniform tasks
+                if "NSCF Uniform" in mat["task_types"][task_id]:
+                    task_query = self.tasks.query_one(
+                        properties=["last_updated", "input.is_hubbard", "orig_inputs.kpoints"],
+                        criteria={"task_id": int(task_id)},
+                    )
+
+                    is_hubbard = task_query["input"]["is_hubbard"]
+                    nkpoints = task_query["orig_inputs"]["kpoints"]["nkpoints"]
+                    lu_dt = task_query["last_updated"]
+
+                    seen_dos_data.append(
+                        {
+                            "task_id": task_id,
+                            "is_hubbard": int(is_hubbard),
+                            "nkpoints": int(nkpoints),
+                            "updated_on": lu_dt,
+                        }
+                    )
+
+            for bs_type in mat["bandstructure"]:
+                # select "blessed" bs of each type and insert all into s3 bucket
+                if seen_bs_data[bs_type]:
+                    sorted_data = sorted(
+                        seen_bs_data[bs_type],
+                        key=lambda entry: (entry["is_hubbard"], entry["nkpoints"], entry["updated_on"]),
+                        reverse=True,
+                    )
+
+                    mat["bandstructure"][bs_type]["task_id"] = int(sorted_data[0]["task_id"])
+                    mat["bandstructure"][bs_type]["data"] = self.bandstructures.query_one(
+                        criteria={"metadata.task_id": int(sorted_data[0]["task_id"])}
+                    )
+
+                    self.s3.connect()
+                    for entry in seen_bs_data[bs_type]:
+                        number_in_s3 = self.s3.count({"task_id": entry["task_id"]})
+                        if number_in_s3 == 0:
+                            bs = BandStructureSymmLine.from_dict(
+                                self.bandstructures.query_one(criteria={"metadata.task_id": int(entry["task_id"])})
+                            )
+                            spin_polarized = bs.is_spin_polarized
+                            num_bands = bs.nb_bands
+                            efermi = bs.efermi
+
+                            keys = bs.bands.keys()
+                            min_energy = min([min(np.ndarray.flatten(bs.bands[key])) for key in keys])
+                            max_energy = max([max(np.ndarray.flatten(bs.bands[key])) for key in keys])
+
+                            num_uniq_elements = len(set([site.species_string for site in bs.structure]))
+
+                            d = {
+                                "data": bs.as_dict(),
+                                "mode": "line",
+                                "path_type": str(bs_type),
+                                "task_id": entry["task_id"],
+                                "spin_polarized": str(spin_polarized),
+                                "num_bands": str(num_bands),
+                                "efermi": str(efermi),
+                                "min_energy": str(min_energy),
+                                "max_energy": str(max_energy),
+                                "uniq_elements": str(num_uniq_elements),
+                                "last_updated": str(entry["updated_on"]),
+                            }
+
+                            self.s3.update([d], key=[key for key in d if key != "data"])
+                    self.s3.close()
+
+            if seen_dos_data:
+
+                sorted_dos_data = sorted(
+                    seen_dos_data,
+                    key=lambda entry: (entry["is_hubbard"], entry["nkpoints"], entry["updated_on"]),
+                    reverse=True,
+                )
+
+                mat["dos"]["task_id"] = int(sorted_dos_data[0]["task_id"])
+                mat["dos"]["data"] = self.dos.query_one(
+                    criteria={"metadata.task_id": int(sorted_dos_data[0]["task_id"])}
+                )
+
+                self.s3.connect()
+                for entry in seen_dos_data:
+                    number_in_s3 = self.s3.count({"task_id": entry["task_id"]})
+                    if number_in_s3 == 0:
+                        dos = CompleteDos.from_dict(
+                            self.dos.query_one(criteria={"metadata.task_id": int(entry["task_id"])})
+                        )
+
+                        spin_polarized = False
+                        if len(dos.densities) == 2:
+                            spin_polarized = True
+
+                        efermi = dos.efermi
+
+                        keys = bs.bands.keys()
+                        min_energy = min(dos.energies)
+                        max_energy = max(dos.energies)
+
+                        num_uniq_elements = len(set([site.species_string for site in dos.structure]))
+
+                        d = {
+                            "data": bs.as_dict(),
+                            "mode": "uniform",
+                            "task_id": entry["task_id"],
+                            "spin_polarized": str(spin_polarized),
+                            "efermi": str(efermi),
+                            "min_energy": str(min_energy),
+                            "max_energy": str(max_energy),
+                            "uniq_elements": str(num_uniq_elements),
+                            "last_updated": str(entry["updated_on"]),
+                        }
+
+                        self.s3.update([d], key=[key for key in d if key != "data"])
+
+                    self.s3.close()
+
             yield mat
 
     def process_item(self, mat):
         """
-        Process the tasks and materials into just a list of materials
+        Process the band structures and dos data.
 
         Args:
             mat (dict): material document
@@ -82,30 +279,65 @@ class ElectronicStructureImageBuilder(Builder):
         Returns:
             (dict): electronic_structure document
         """
-        d = {self.electronic_structure.key: mat[self.materials.key]}
+
+        structure = Structure.from_dict(mat["structure"])
+
+        structure_metadata = sm(structure)
+
+        dos_data = {
+            "total": {"band_gap": {}, "cbm": {}, "vbm": {}},
+            "elements": {},
+            "orbitals": {
+                "s": {"band_gap": {}, "cbm": {}, "vbm": {}},
+                "p": {"band_gap": {}, "cbm": {}, "vbm": {}},
+                "d": {"band_gap": {}, "cbm": {}, "vbm": {}},
+            },
+        }
+
+        bs_data = {"total": {"band_gap": {}, "cbm": {}, "vbm": {}}}
+
+        d = {
+            self.electronic_structure.key: mat[self.materials.key],
+            "bandstructure": {
+                "sc": copy.deepcopy(bs_data),
+                "lm": copy.deepcopy(bs_data),
+                "hin": copy.deepcopy(bs_data),
+            },
+            "dos": dos_data,
+        }
+
         self.logger.info("Processing: {}".format(mat[self.materials.key]))
 
-        bs_all = BandStructureSymmLine.from_dict(mat["bandstructure"]["bs"])
-        dos = CompleteDos.from_dict(mat["bandstructure"]["dos"])
+        dos = CompleteDos.from_dict(mat["dos"]["data"])
 
-        if bs_all and dos:
-            try:
-                for path_type in ['sc', 'lm', 'hin']:
-                    bs_dos_plotter = BSPlotterPlotly(bs_all, dos, path_type)
-                    plt = bs_dos_plotter.get_plotly_plot(smooth=False, continuous=False)
-                    d["bs_{}".format(path_type)] = bs_dos_plotter._bs
-                    d["plot_{}".format(path_type)] = plt.to_image(format='png')
-                    d["plot_dict_{}".format(path_type)] = plt.to_dict()
-                    plt.close()
-            except Exception:
-                traceback.print_exc()
-                self.logger.warning("Caught error in bandstructure plotting for {}: {}".format(
-                    mat[self.materials.key], traceback.format_exc()))
+        type_available = [bs_type for bs_type in mat["bandstructure"].keys() if mat["bandstructure"][bs_type]]
+        self.logger.info("Processing band structure types: {}".format(type_available))
 
-        # Store task_ids
-        for k in ["bs_task", "dos_task", "uniform_task"]:
-            if k in mat["bandstructure"]:
-                d[k] = mat["bandstructure"][k]
+        for bs_type in type_available:
+
+            bs = BandStructureSymmLine.from_dict(mat["bandstructure"][bs_type]["data"])
+            is_sp = bs.is_spin_polarized
+
+            bsp = BSPlotterPlotly(bandstructure=bs, dos=dos)
+
+            # -- Get total and projected band structure data and traces
+            d["bandstructure"][bs_type]["task_id"] = mat["bandstructure"][bs_type]["task_id"]
+            d["bandstructure"][bs_type]["total"]["band_gap"] = bs.get_band_gap()
+            d["bandstructure"][bs_type]["total"]["cbm"] = bs.get_cbm()
+            d["bandstructure"][bs_type]["total"]["vbm"] = bs.get_vbm()
+
+            self._process_bs(d=d, bs=bs, bs_type=bs_type, bsp=bsp, spin_polarized=is_sp)
+
+            # -- Get total and projected dos data and traces
+            if bs_type == "sc":
+                d["dos"]["task_id"] = mat["dos"]["task_id"]
+                self._process_dos(d=d, dos=dos, bsp=bsp, spin_polarized=is_sp)
+
+        d = {
+            self.electronic_structure.last_updated_field: mat[self.materials.last_updated_field],
+            **structure_metadata,
+            **d,
+        }
 
         return d
 
@@ -124,27 +356,158 @@ class ElectronicStructureImageBuilder(Builder):
         else:
             self.logger.info("No electronic structure docs to update")
 
+    @staticmethod
+    def _process_bs(d, bs, bs_type, bsp, spin_polarized):
+        total_traces, kpath_labels, tick_vals = bsp._reg_traces(continuous=bs_type is "lm", energy_window=(-7.0, 11.0))
 
-def build_bs(bs_dict, mat):
+        # d["bandstructure"][bs_type]["total"]["labels"] = kpath_labels
 
-    bs_dict["structure"] = mat["structure"]
+        # - Get band projection data and fractional contributions
+        # ele_proj = bs.get_projection_on_elements()
+        # for ele in ele_proj[Spin.up][0][0].keys():
+        # orb_proj = bs.get_projections_on_elements_and_orbitals(el_orb_spec={ele:['s','p','d']})
 
-    # Add in High Symm K Path if not already there
-    if len(bs_dict.get("labels_dict", {})) == 0:
-        labels = get(mat, "inputs.nscf_line.kpoints.labels", None)
-        kpts = get(mat, "inputs.nscf_line.kpoints.kpoints", None)
-        if labels and kpts:
-            labels_dict = dict(zip(labels, kpts))
-            labels_dict.pop(None, None)
+        # if spin_polarized:
+        #     for s_ind, spin in enumerate([Spin.up, Spin.down]):
+        #         d["bandstructure"][bs_type]["total"]["traces"][spin] = [
+        #             total_traces[(2 * trace_num) + s_ind].to_plotly_json()
+        #             for trace_num in range(int(len(total_traces) / 2))
+        #         ]
+        # else:
+        #     d["bandstructure"][bs_type]["total"]["traces"][Spin.up] = [trace.to_plotly_json() for trace in total_traces]
+
+        # -- Get equivalent labels between different conventions
+        types = ["sc", "hin"]
+
+        hskp = HighSymmKpath(bs.structure, path_type="all", symprec=0.1, angle_tolerance=5, atol=1e-5)
+        eq_labels = hskp.equiv_labels
+
+        if bs_type == "lm":
+            d["bandstructure"][bs_type]["total"]["equiv_labels"] = eq_labels
         else:
-            struc = Structure.from_dict(bs_dict["structure"])
-            labels_dict = HighSymmKpath(struc)._kpath["kpoints"]
+            types.remove(bs_type)
+            eq_labels_new = {"lm": {}, types[0]: {}}
 
-        bs_dict["labels_dict"] = labels_dict
+            for ind, key in enumerate(eq_labels[bs_type]):
 
-    # This is somethign to do with BandStructureSymmLine's from dict being problematic
-    bs = BandStructureSymmLine.from_dict(bs_dict)
+                replacement = eq_labels[bs_type][key].replace("^{*}", "")
 
-    return bs
+                try:
+                    eq_labels_new["lm"][replacement] = key
+                except:
+                    eq_labels_new["lm"][replacement] = replacement
+
+                try:
+                    eq_labels_new[types[0]][replacement] = eq_labels[types[0]][key].replace("^{*}", "")
+                except:
+                    eq_labels_new[types[0]][replacement] = replacement
+
+            d["bandstructure"][bs_type]["total"]["equiv_labels"] = eq_labels_new
+
+    @staticmethod
+    def _process_dos(d, dos, bsp, spin_polarized):
+        orbitals = [OrbitalType.s, OrbitalType.p, OrbitalType.d]
+
+        dos_tot_ele_tr, ele_dos = bsp._get_dos_data(orbital_projection=None, energy_window=(-7.0, 11.0))
+
+        dos_tot_orb_tr, tot_orb_dos = bsp._get_dos_data(orbital_projection="total", energy_window=(-7.0, 11.0))
+
+        for ele in ele_dos.keys():
+            d["dos"]["elements"][str(ele)] = {}
+            for sub_label in ["total", "s", "p", "d"]:
+                d["dos"]["elements"][str(ele)][sub_label] = {"traces": {}, "band_gap": {}, "cbm": {}, "vbm": {}}
+
+        if spin_polarized:
+            for s_ind, spin in enumerate([Spin.down, Spin.up]):
+                # - Process total DOS data
+                # d["dos"]["total"]["traces"][spin] = dos_tot_ele_tr[s_ind].to_plotly_json()
+                d["dos"]["total"]["band_gap"][spin] = dos.get_gap(spin=spin)
+                (cbm, vbm) = dos.get_cbm_vbm(spin=spin)
+                d["dos"]["total"]["cbm"][spin] = cbm
+                d["dos"]["total"]["vbm"][spin] = vbm
+
+                # - Process total orbital projection data
+                for o_ind, orbital in enumerate(orbitals):
+                    # d["dos"]["orbitals"][str(orbital)]["traces"][spin] = dos_tot_orb_tr[
+                    #     (2 * o_ind) + 2 + s_ind
+                    # ].to_plotly_json()
+                    d["dos"]["orbitals"][str(orbital)]["band_gap"][spin] = tot_orb_dos[orbital].get_gap(spin=spin)
+                    (cbm, vbm) = tot_orb_dos[orbital].get_cbm_vbm(spin=spin)
+                    d["dos"]["orbitals"][str(orbital)]["cbm"][spin] = cbm
+                    d["dos"]["orbitals"][str(orbital)]["vbm"][spin] = vbm
+
+            # - Process element and element orbital projection data
+            for ind1, ele in enumerate(ele_dos):
+                dos_orb_tr, orb_dos = bsp._get_dos_data(orbital_projection=ele, energy_window=(-7.0, 11.0))
+
+                for ind2, orbital in enumerate(["total"] + list(orb_dos.keys())):
+                    if orbital == "total":
+                        proj_dos = ele_dos
+                        trace_data = dos_tot_ele_tr
+                        label = ele
+                        ind = (2 * ind1) + 2
+                    else:
+                        proj_dos = orb_dos
+                        trace_data = dos_orb_tr
+                        label = orbital
+                        ind = 2 * ind2
+
+                    for spin in [Spin.down, Spin.up]:
+                        d["dos"]["elements"][str(ele)][str(orbital)]["band_gap"][spin] = proj_dos[label].get_gap(
+                            spin=spin
+                        )
+                        (cbm, vbm) = proj_dos[label].get_cbm_vbm(spin=spin)
+                        d["dos"]["elements"][str(ele)][str(orbital)]["cbm"][spin] = cbm
+                        d["dos"]["elements"][str(ele)][str(orbital)]["vbm"][spin] = vbm
+
+                    # d["dos"]["elements"][ele.symbol][str(orbital)]["traces"][Spin.down] = trace_data[
+                    #     ind
+                    # ].to_plotly_json()
+                    # d["dos"]["elements"][ele.symbol][str(orbital)]["traces"][Spin.up] = trace_data[
+                    #     ind + 1
+                    # ].to_plotly_json()
+
+        else:
+            # - Process total DOS data
+            # d["dos"]["total"]["traces"][Spin.up] = dos_tot_ele_tr[0].to_plotly_json()
+            d["dos"]["total"]["band_gap"][Spin.up] = dos.get_gap(spin=Spin.up)
+            (cbm, vbm) = dos.get_cbm_vbm(spin=Spin.up)
+            d["dos"]["total"]["cbm"][Spin.up] = cbm
+            d["dos"]["total"]["vbm"][Spin.up] = vbm
+
+            # - Process total orbital projection data
+            for o_ind, orbital in enumerate(orbitals):
+                # d["dos"]["orbitals"][str(orbital)]["traces"][Spin.up] = dos_tot_orb_tr[o_ind + 1].to_plotly_json()
+                d["dos"]["orbitals"][str(orbital)]["band_gap"][Spin.up] = tot_orb_dos[orbital].get_gap(spin=Spin.up)
+                (cbm, vbm) = tot_orb_dos[orbital].get_cbm_vbm(spin=Spin.up)
+                d["dos"]["orbitals"][str(orbital)]["cbm"][Spin.up] = cbm
+                d["dos"]["orbitals"][str(orbital)]["vbm"][Spin.up] = vbm
+
+            # - Process element and element orbital projection data
+            for ind1, ele in enumerate(ele_dos):
+                dos_orb_tr, orb_dos = bsp._get_dos_data(orbital_projection=ele, energy_window=(-7.0, 11.0))
+
+                for ind2, orbital in enumerate(["total"] + orbitals):
+                    if orbital == "total":
+                        proj_dos = ele_dos
+                        trace_data = dos_tot_ele_tr
+                        label = ele
+                        ind = ind1 + 1
+                    else:
+                        proj_dos = orb_dos
+                        trace_data = dos_orb_tr
+                        label = orbital
+                        ind = ind2
+
+                    d["dos"]["elements"][str(ele)][str(orbital)]["band_gap"][Spin.up] = proj_dos[label].get_gap(
+                        spin=Spin.up
+                    )
+                    (cbm, vbm) = proj_dos[label].get_cbm_vbm(spin=Spin.up)
+                    d["dos"]["elements"][str(ele)][str(orbital)]["cbm"][Spin.up] = cbm
+                    d["dos"]["elements"][str(ele)][str(orbital)]["vbm"][Spin.up] = vbm
+
+                    # d["dos"]["elements"][ele.symbol][str(orbital)]["traces"][Spin.up] = trace_data[ind].to_plotly_json()
 
 
+class BSDOSPlotBuilder:
+    pass
