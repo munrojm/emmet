@@ -143,7 +143,7 @@ class BSDOSBuilder(Builder):
                     if bs_type is not None:
                         seen_bs_data[bs_type].append(
                             {
-                                "task_id": task_id,
+                                "task_id": str(task_id),
                                 "is_hubbard": int(is_hubbard),
                                 "nkpoints": int(nkpoints),
                                 "updated_on": lu_dt,
@@ -163,7 +163,7 @@ class BSDOSBuilder(Builder):
 
                     seen_dos_data.append(
                         {
-                            "task_id": task_id,
+                            "task_id": str(task_id),
                             "is_hubbard": int(is_hubbard),
                             "nkpoints": int(nkpoints),
                             "updated_on": lu_dt,
@@ -205,13 +205,13 @@ class BSDOSBuilder(Builder):
                                 "data": bs.as_dict(),
                                 "mode": "line",
                                 "path_type": str(bs_type),
-                                "task_id": entry["task_id"],
+                                "task_id": str(entry["task_id"]),
                                 "spin_polarized": str(spin_polarized),
                                 "num_bands": str(num_bands),
                                 "efermi": str(efermi),
                                 "min_energy": str(min_energy),
                                 "max_energy": str(max_energy),
-                                "uniq_elements": str(num_uniq_elements),
+                                "num_uniq_elements": str(num_uniq_elements),
                                 "last_updated": str(entry["updated_on"]),
                             }
 
@@ -259,7 +259,7 @@ class BSDOSBuilder(Builder):
                             "efermi": str(efermi),
                             "min_energy": str(min_energy),
                             "max_energy": str(max_energy),
-                            "uniq_elements": str(num_uniq_elements),
+                            "num_uniq_elements": str(num_uniq_elements),
                             "last_updated": str(entry["updated_on"]),
                         }
 
@@ -297,7 +297,7 @@ class BSDOSBuilder(Builder):
         bs_data = {"total": {"band_gap": {}, "cbm": {}, "vbm": {}}}
 
         d = {
-            self.electronic_structure.key: mat[self.materials.key],
+            self.electronic_structure.key: str(mat[self.materials.key]),
             "bandstructure": {
                 "sc": copy.deepcopy(bs_data),
                 "lm": copy.deepcopy(bs_data),
@@ -415,7 +415,7 @@ class BSDOSBuilder(Builder):
         for ele in ele_dos.keys():
             d["dos"]["elements"][str(ele)] = {}
             for sub_label in ["total", "s", "p", "d"]:
-                d["dos"]["elements"][str(ele)][sub_label] = {"traces": {}, "band_gap": {}, "cbm": {}, "vbm": {}}
+                d["dos"]["elements"][str(ele)][sub_label] = {"band_gap": {}, "cbm": {}, "vbm": {}}
 
         if spin_polarized:
             for s_ind, spin in enumerate([Spin.down, Spin.up]):
