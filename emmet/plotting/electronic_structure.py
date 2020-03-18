@@ -11,13 +11,11 @@ from emmet.vasp.materials import structure_metadata as sm
 import copy
 import numpy as np
 
-from emmet.plotting.utils import BSPlotterPlotly
-
 __author__ = "Jason Munro <jmunro@lbl.gov>"
 
 
 class BSDOSBuilder(Builder):
-    def __init__(self, tasks, materials, electronic_structure, bandstructures, dos, s3, query=None, **kwargs):
+    def __init__(self, tasks, materials, electronic_structure, bandstructures, dos, query=None, **kwargs):
         """
         Creates an electronic structure from a tasks collection, the associated band structures and density of states, and the materials structure
 
@@ -30,7 +28,6 @@ class BSDOSBuilder(Builder):
         electronic_structure  (Store) : Store of electronic structure documents
         bandstructures (Store) : store of bandstructures
         dos (Store) : store of DOS
-        s3 (Store) : store of AWS S3 bucket
         query (dict): dictionary to limit tasks to be analyzed
         """
 
@@ -39,7 +36,6 @@ class BSDOSBuilder(Builder):
         self.electronic_structure = electronic_structure
         self.bandstructures = bandstructures
         self.dos = dos
-        self.s3 = s3
         self.query = query if query else {}
 
         super().__init__(sources=[tasks, materials, bandstructures, dos], targets=[electronic_structure], **kwargs)
@@ -171,7 +167,7 @@ class BSDOSBuilder(Builder):
                     )
 
             for bs_type in mat["bandstructure"]:
-                # select "blessed" bs of each type and insert all into s3 bucket
+                # select "blessed" bs of each type
                 if seen_bs_data[bs_type]:
                     sorted_data = sorted(
                         seen_bs_data[bs_type],
@@ -183,40 +179,6 @@ class BSDOSBuilder(Builder):
                     mat["bandstructure"][bs_type]["data"] = self.bandstructures.query_one(
                         criteria={"metadata.task_id": int(sorted_data[0]["task_id"])}
                     )
-
-                    self.s3.connect()
-                    for entry in seen_bs_data[bs_type]:
-                        number_in_s3 = self.s3.count({"task_id": entry["task_id"]})
-                        if number_in_s3 == 0:
-                            bs = BandStructureSymmLine.from_dict(
-                                self.bandstructures.query_one(criteria={"metadata.task_id": int(entry["task_id"])})
-                            )
-                            spin_polarized = bs.is_spin_polarized
-                            num_bands = bs.nb_bands
-                            efermi = bs.efermi
-
-                            keys = bs.bands.keys()
-                            min_energy = min([min(np.ndarray.flatten(bs.bands[key])) for key in keys])
-                            max_energy = max([max(np.ndarray.flatten(bs.bands[key])) for key in keys])
-
-                            num_uniq_elements = len(set([site.species_string for site in bs.structure]))
-
-                            d = {
-                                "data": bs.as_dict(),
-                                "mode": "line",
-                                "path_type": str(bs_type),
-                                "task_id": str(entry["task_id"]),
-                                "spin_polarized": str(spin_polarized),
-                                "num_bands": str(num_bands),
-                                "efermi": str(efermi),
-                                "min_energy": str(min_energy),
-                                "max_energy": str(max_energy),
-                                "num_uniq_elements": str(num_uniq_elements),
-                                "last_updated": str(entry["updated_on"]),
-                            }
-
-                            self.s3.update([d], key=[key for key in d if key != "data"])
-                    self.s3.close()
 
             if seen_dos_data:
 
@@ -230,42 +192,6 @@ class BSDOSBuilder(Builder):
                 mat["dos"]["data"] = self.dos.query_one(
                     criteria={"metadata.task_id": int(sorted_dos_data[0]["task_id"])}
                 )
-
-                self.s3.connect()
-                for entry in seen_dos_data:
-                    number_in_s3 = self.s3.count({"task_id": entry["task_id"]})
-                    if number_in_s3 == 0:
-                        dos = CompleteDos.from_dict(
-                            self.dos.query_one(criteria={"metadata.task_id": int(entry["task_id"])})
-                        )
-
-                        spin_polarized = False
-                        if len(dos.densities) == 2:
-                            spin_polarized = True
-
-                        efermi = dos.efermi
-
-                        keys = bs.bands.keys()
-                        min_energy = min(dos.energies)
-                        max_energy = max(dos.energies)
-
-                        num_uniq_elements = len(set([site.species_string for site in dos.structure]))
-
-                        d = {
-                            "data": bs.as_dict(),
-                            "mode": "uniform",
-                            "task_id": entry["task_id"],
-                            "spin_polarized": str(spin_polarized),
-                            "efermi": str(efermi),
-                            "min_energy": str(min_energy),
-                            "max_energy": str(max_energy),
-                            "num_uniq_elements": str(num_uniq_elements),
-                            "last_updated": str(entry["updated_on"]),
-                        }
-
-                        self.s3.update([d], key=[key for key in d if key != "data"])
-
-                    self.s3.close()
 
             yield mat
 
@@ -318,20 +244,18 @@ class BSDOSBuilder(Builder):
             bs = BandStructureSymmLine.from_dict(mat["bandstructure"][bs_type]["data"])
             is_sp = bs.is_spin_polarized
 
-            bsp = BSPlotterPlotly(bandstructure=bs, dos=dos)
-
             # -- Get total and projected band structure data and traces
             d["bandstructure"][bs_type]["task_id"] = mat["bandstructure"][bs_type]["task_id"]
             d["bandstructure"][bs_type]["total"]["band_gap"] = bs.get_band_gap()
             d["bandstructure"][bs_type]["total"]["cbm"] = bs.get_cbm()
             d["bandstructure"][bs_type]["total"]["vbm"] = bs.get_vbm()
 
-            self._process_bs(d=d, bs=bs, bs_type=bs_type, bsp=bsp, spin_polarized=is_sp)
+            self._process_bs(d=d, bs=bs, bs_type=bs_type)
 
             # -- Get total and projected dos data and traces
             if bs_type == "sc":
                 d["dos"]["task_id"] = mat["dos"]["task_id"]
-                self._process_dos(d=d, dos=dos, bsp=bsp, spin_polarized=is_sp)
+                self._process_dos(d=d, dos=dos, spin_polarized=is_sp)
 
         d = {
             self.electronic_structure.last_updated_field: mat[self.materials.last_updated_field],
@@ -357,60 +281,23 @@ class BSDOSBuilder(Builder):
             self.logger.info("No electronic structure docs to update")
 
     @staticmethod
-    def _process_bs(d, bs, bs_type, bsp, spin_polarized):
-        total_traces, kpath_labels, tick_vals = bsp._reg_traces(continuous=bs_type is "lm", energy_window=(-7.0, 11.0))
-
-        # d["bandstructure"][bs_type]["total"]["labels"] = kpath_labels
-
-        # - Get band projection data and fractional contributions
-        # ele_proj = bs.get_projection_on_elements()
-        # for ele in ele_proj[Spin.up][0][0].keys():
-        # orb_proj = bs.get_projections_on_elements_and_orbitals(el_orb_spec={ele:['s','p','d']})
-
-        # if spin_polarized:
-        #     for s_ind, spin in enumerate([Spin.up, Spin.down]):
-        #         d["bandstructure"][bs_type]["total"]["traces"][spin] = [
-        #             total_traces[(2 * trace_num) + s_ind].to_plotly_json()
-        #             for trace_num in range(int(len(total_traces) / 2))
-        #         ]
-        # else:
-        #     d["bandstructure"][bs_type]["total"]["traces"][Spin.up] = [trace.to_plotly_json() for trace in total_traces]
+    def _process_bs(d, bs, bs_type):
 
         # -- Get equivalent labels between different conventions
-        types = ["sc", "hin"]
+        types = ["sc", "hin", "lm"]
 
         hskp = HighSymmKpath(bs.structure, path_type="all", symprec=0.1, angle_tolerance=5, atol=1e-5)
         eq_labels = hskp.equiv_labels
 
-        if bs_type == "lm":
-            d["bandstructure"][bs_type]["total"]["equiv_labels"] = eq_labels
-        else:
-            types.remove(bs_type)
-            eq_labels_new = {"lm": {}, types[0]: {}}
-
-            for ind, key in enumerate(eq_labels[bs_type]):
-
-                replacement = eq_labels[bs_type][key].replace("^{*}", "")
-
-                try:
-                    eq_labels_new["lm"][replacement] = key
-                except:
-                    eq_labels_new["lm"][replacement] = replacement
-
-                try:
-                    eq_labels_new[types[0]][replacement] = eq_labels[types[0]][key].replace("^{*}", "")
-                except:
-                    eq_labels_new[types[0]][replacement] = replacement
-
-            d["bandstructure"][bs_type]["total"]["equiv_labels"] = eq_labels_new
+        for ptype in types:
+            d["bandstructure"][bs_type]["total"]["equiv_labels"] = eq_labels[ptype]
 
     @staticmethod
-    def _process_dos(d, dos, bsp, spin_polarized):
+    def _process_dos(d, dos, spin_polarized):
         orbitals = [OrbitalType.s, OrbitalType.p, OrbitalType.d]
 
-        dos_tot_ele_tr, ele_dos = bsp._get_dos_data(orbital_projection=None, energy_window=(-7.0, 11.0))
-
-        dos_tot_orb_tr, tot_orb_dos = bsp._get_dos_data(orbital_projection="total", energy_window=(-7.0, 11.0))
+        ele_dos = dos.get_element_dos()
+        tot_orb_dos = dos.get_spd_dos()
 
         for ele in ele_dos.keys():
             d["dos"]["elements"][str(ele)] = {}
@@ -420,7 +307,6 @@ class BSDOSBuilder(Builder):
         if spin_polarized:
             for s_ind, spin in enumerate([Spin.down, Spin.up]):
                 # - Process total DOS data
-                # d["dos"]["total"]["traces"][spin] = dos_tot_ele_tr[s_ind].to_plotly_json()
                 d["dos"]["total"]["band_gap"][spin] = dos.get_gap(spin=spin)
                 (cbm, vbm) = dos.get_cbm_vbm(spin=spin)
                 d["dos"]["total"]["cbm"][spin] = cbm
@@ -428,9 +314,6 @@ class BSDOSBuilder(Builder):
 
                 # - Process total orbital projection data
                 for o_ind, orbital in enumerate(orbitals):
-                    # d["dos"]["orbitals"][str(orbital)]["traces"][spin] = dos_tot_orb_tr[
-                    #     (2 * o_ind) + 2 + s_ind
-                    # ].to_plotly_json()
                     d["dos"]["orbitals"][str(orbital)]["band_gap"][spin] = tot_orb_dos[orbital].get_gap(spin=spin)
                     (cbm, vbm) = tot_orb_dos[orbital].get_cbm_vbm(spin=spin)
                     d["dos"]["orbitals"][str(orbital)]["cbm"][spin] = cbm
@@ -438,19 +321,15 @@ class BSDOSBuilder(Builder):
 
             # - Process element and element orbital projection data
             for ind1, ele in enumerate(ele_dos):
-                dos_orb_tr, orb_dos = bsp._get_dos_data(orbital_projection=ele, energy_window=(-7.0, 11.0))
+                orb_dos = dos.get_element_spd_dos(ele)
 
                 for ind2, orbital in enumerate(["total"] + list(orb_dos.keys())):
                     if orbital == "total":
                         proj_dos = ele_dos
-                        trace_data = dos_tot_ele_tr
                         label = ele
-                        ind = (2 * ind1) + 2
                     else:
                         proj_dos = orb_dos
-                        trace_data = dos_orb_tr
                         label = orbital
-                        ind = 2 * ind2
 
                     for spin in [Spin.down, Spin.up]:
                         d["dos"]["elements"][str(ele)][str(orbital)]["band_gap"][spin] = proj_dos[label].get_gap(
@@ -460,16 +339,8 @@ class BSDOSBuilder(Builder):
                         d["dos"]["elements"][str(ele)][str(orbital)]["cbm"][spin] = cbm
                         d["dos"]["elements"][str(ele)][str(orbital)]["vbm"][spin] = vbm
 
-                    # d["dos"]["elements"][ele.symbol][str(orbital)]["traces"][Spin.down] = trace_data[
-                    #     ind
-                    # ].to_plotly_json()
-                    # d["dos"]["elements"][ele.symbol][str(orbital)]["traces"][Spin.up] = trace_data[
-                    #     ind + 1
-                    # ].to_plotly_json()
-
         else:
             # - Process total DOS data
-            # d["dos"]["total"]["traces"][Spin.up] = dos_tot_ele_tr[0].to_plotly_json()
             d["dos"]["total"]["band_gap"][Spin.up] = dos.get_gap(spin=Spin.up)
             (cbm, vbm) = dos.get_cbm_vbm(spin=Spin.up)
             d["dos"]["total"]["cbm"][Spin.up] = cbm
@@ -477,7 +348,6 @@ class BSDOSBuilder(Builder):
 
             # - Process total orbital projection data
             for o_ind, orbital in enumerate(orbitals):
-                # d["dos"]["orbitals"][str(orbital)]["traces"][Spin.up] = dos_tot_orb_tr[o_ind + 1].to_plotly_json()
                 d["dos"]["orbitals"][str(orbital)]["band_gap"][Spin.up] = tot_orb_dos[orbital].get_gap(spin=Spin.up)
                 (cbm, vbm) = tot_orb_dos[orbital].get_cbm_vbm(spin=Spin.up)
                 d["dos"]["orbitals"][str(orbital)]["cbm"][Spin.up] = cbm
@@ -485,17 +355,15 @@ class BSDOSBuilder(Builder):
 
             # - Process element and element orbital projection data
             for ind1, ele in enumerate(ele_dos):
-                dos_orb_tr, orb_dos = bsp._get_dos_data(orbital_projection=ele, energy_window=(-7.0, 11.0))
+                orb_dos = dos.get_element_spd_dos(ele)
 
                 for ind2, orbital in enumerate(["total"] + orbitals):
                     if orbital == "total":
                         proj_dos = ele_dos
-                        trace_data = dos_tot_ele_tr
                         label = ele
                         ind = ind1 + 1
                     else:
                         proj_dos = orb_dos
-                        trace_data = dos_orb_tr
                         label = orbital
                         ind = ind2
 
@@ -505,8 +373,6 @@ class BSDOSBuilder(Builder):
                     (cbm, vbm) = proj_dos[label].get_cbm_vbm(spin=Spin.up)
                     d["dos"]["elements"][str(ele)][str(orbital)]["cbm"][Spin.up] = cbm
                     d["dos"]["elements"][str(ele)][str(orbital)]["vbm"][Spin.up] = vbm
-
-                    # d["dos"]["elements"][ele.symbol][str(orbital)]["traces"][Spin.up] = trace_data[ind].to_plotly_json()
 
 
 class BSDOSPlotBuilder:
