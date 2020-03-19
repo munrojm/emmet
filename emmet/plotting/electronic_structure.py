@@ -284,13 +284,11 @@ class BSDOSBuilder(Builder):
     def _process_bs(d, bs, bs_type):
 
         # -- Get equivalent labels between different conventions
-        types = ["sc", "hin", "lm"]
 
         hskp = HighSymmKpath(bs.structure, path_type="all", symprec=0.1, angle_tolerance=5, atol=1e-5)
         eq_labels = hskp.equiv_labels
 
-        for ptype in types:
-            d["bandstructure"][bs_type]["total"]["equiv_labels"] = eq_labels[ptype]
+        d["bandstructure"][bs_type]["total"]["equiv_labels"] = eq_labels[bs_type]
 
     @staticmethod
     def _process_dos(d, dos, spin_polarized):
