@@ -75,9 +75,7 @@ class MaterialsBuilder(Builder):
 
         self.__settings = load_settings(self.materials_settings, default_mat_settings)
 
-        self.allowed_tasks = {
-            t_type for d in self.__settings for t_type in d["quality_score"]
-        }
+        self.allowed_tasks = {t_type for d in self.__settings for t_type in d["quality_score"]}
 
         sources = [tasks]
         if self.task_types:
@@ -109,9 +107,7 @@ class MaterialsBuilder(Builder):
         all_tasks = set(self.tasks.distinct(self.tasks.key, q))
         processed_tasks = set(self.materials.distinct("task_ids"))
         to_process_tasks = all_tasks - processed_tasks
-        to_process_forms = self.tasks.distinct(
-            "formula_pretty", {"task_id": {"$in": list(to_process_tasks)}}
-        )
+        to_process_forms = self.tasks.distinct("formula_pretty", {"task_id": {"$in": list(to_process_tasks)}})
         self.logger.info("Found {} unprocessed tasks".format(len(to_process_tasks)))
         self.logger.info("Found {} unprocessed formulas".format(len(to_process_forms)))
 
@@ -119,18 +115,14 @@ class MaterialsBuilder(Builder):
         update_q = dict(q)
         update_q.update(self.tasks.lu_filter(self.materials))
         updated_forms = self.tasks.distinct("formula_pretty", update_q)
-        self.logger.info(
-            "Found {} updated systems to proces".format(len(updated_forms))
-        )
+        self.logger.info("Found {} updated systems to proces".format(len(updated_forms)))
 
         forms_to_update = set(updated_forms) | set(to_process_forms)
         self.logger.info("Processing {} total systems".format(len(forms_to_update)))
         self.total = len(forms_to_update)
 
         if self.task_types:
-            invalid_ids = set(
-                self.task_types.distinct(self.task_types.key, {"is_valid": False})
-            )
+            invalid_ids = set(self.task_types.distinct(self.task_types.key, {"is_valid": False}))
         else:
             invalid_ids = set()
 
@@ -170,11 +162,7 @@ class MaterialsBuilder(Builder):
                 self.post_process(mat)
                 materials.append(mat)
 
-        self.logger.debug(
-            "Produced {} materials for {}".format(
-                len(materials), tasks[0]["formula_pretty"]
-            )
-        )
+        self.logger.debug("Produced {} materials for {}".format(len(materials), tasks[0]["formula_pretty"]))
 
         return materials
 
@@ -194,7 +182,7 @@ class MaterialsBuilder(Builder):
 
         if len(items) > 0:
             self.logger.info("Updating {} materials".format(len(items)))
-            self.materials.update(docs=items, update_lu=False)
+            self.materials.update(docs=items)
         else:
             self.logger.info("No items to update")
 
@@ -204,9 +192,7 @@ class MaterialsBuilder(Builder):
         """
 
         # Convert the task to properties and flatten
-        all_props = list(
-            chain.from_iterable([self.task_to_prop_list(t) for t in task_group])
-        )
+        all_props = list(chain.from_iterable([self.task_to_prop_list(t) for t in task_group]))
 
         mat_id = find_mat_id(all_props)
 
@@ -219,24 +205,17 @@ class MaterialsBuilder(Builder):
 
         # Add in the provenance for the properties
         origins = [
-            {
-                k: prop[k]
-                for k in ["materials_key", "task_type", "task_id", "last_updated"]
-            }
+            {k: prop[k] for k in ["materials_key", "task_type", "task_id", "last_updated"]}
             for prop in best_props
             if prop.get("track", False)
         ]
 
         # Store any bad props
-        invalid_props = [
-            prop["materials_key"] for prop in best_props if not prop["is_valid"]
-        ]
+        invalid_props = [prop["materials_key"] for prop in best_props if not prop["is_valid"]]
 
         # Store all the task_ids
         task_ids = list(set([t["task_id"] for t in task_group]))
-        deprecated_tasks = list(
-            set([t["task_id"] for t in task_group if not t.get("is_valid", True)])
-        )
+        deprecated_tasks = list(set([t["task_id"] for t in task_group if not t.get("is_valid", True)]))
 
         # Store task_types
         task_types = {t["task_id"]: t["task_type"] for t in all_props}
@@ -245,7 +224,7 @@ class MaterialsBuilder(Builder):
         sandboxes = list(set(chain.from_iterable([k["sbxn"] for k in best_props])))
 
         mat = {
-            self.materials.lu_field: max([prop["last_updated"] for prop in all_props]),
+            self.materials.last_updated_field: max([prop["last_updated"] for prop in all_props]),
             "created_at": min([prop["last_updated"] for prop in all_props]),
             "task_ids": task_ids,
             "deprecated_tasks": deprecated_tasks,
@@ -266,9 +245,7 @@ class MaterialsBuilder(Builder):
         Groups tasks by structure matching
         """
 
-        filtered_tasks = [
-            t for t in tasks if task_type(t["orig_inputs"]) in self.allowed_tasks
-        ]
+        filtered_tasks = [t for t in tasks if task_type(t["orig_inputs"]) in self.allowed_tasks]
 
         structures = []
 
@@ -320,7 +297,7 @@ class MaterialsBuilder(Builder):
                             "quality_score": prop["quality_score"][t_type],
                             "track": prop.get("track", False),
                             "aggregate": prop.get("aggregate", False),
-                            "last_updated": task[self.tasks.lu_field],
+                            "last_updated": task[self.tasks.last_updated_field],
                             "energy": get(task, "output.energy_per_atom", 0.0),
                             "materials_key": prop["materials_key"],
                             "is_valid": task.get("is_valid", True),
@@ -328,9 +305,7 @@ class MaterialsBuilder(Builder):
                         }
                     )
                 elif not prop.get("optional", False):
-                    self.logger.error(
-                        "Failed getting {} for task: {}".format(prop["tasks_key"], t_id)
-                    )
+                    self.logger.error("Failed getting {} for task: {}".format(prop["tasks_key"], t_id))
         return props
 
     def valid(self, doc):
@@ -366,13 +341,9 @@ class MaterialsBuilder(Builder):
 
         # Reorder voigt output from VASP to standard voigt notation
         if has(mat, "piezo.ionic"):
-            mat["piezo"]["ionic"] = PiezoTensor.from_vasp_voigt(
-                mat["piezo"]["ionic"]
-            ).voigt.tolist()
+            mat["piezo"]["ionic"] = PiezoTensor.from_vasp_voigt(mat["piezo"]["ionic"]).voigt.tolist()
         if has(mat, "piezo.static"):
-            mat["piezo"]["static"] = PiezoTensor.from_vasp_voigt(
-                mat["piezo"]["static"]
-            ).voigt.tolist()
+            mat["piezo"]["static"] = PiezoTensor.from_vasp_voigt(mat["piezo"]["static"]).voigt.tolist()
 
     def ensure_indexes(self):
         """
@@ -383,12 +354,12 @@ class MaterialsBuilder(Builder):
         self.tasks.ensure_index(self.tasks.key, unique=True)
         self.tasks.ensure_index("state")
         self.tasks.ensure_index("formula_pretty")
-        self.tasks.ensure_index(self.tasks.lu_field)
+        self.tasks.ensure_index(self.tasks.last_updated_field)
 
         # Search index for materials
         self.materials.ensure_index(self.materials.key, unique=True)
         self.materials.ensure_index("task_ids")
-        self.materials.ensure_index(self.materials.lu_field)
+        self.materials.ensure_index(self.materials.last_updated_field)
 
         if self.task_types:
             self.task_types.ensure_index(self.task_types.key)
@@ -406,10 +377,7 @@ def find_mat_id(props):
     possible_mat_ids = [prop for prop in props if "structure" in prop["materials_key"]]
 
     # Sort task_ids by ID
-    possible_mat_ids = [
-        prop["task_id"]
-        for prop in sorted(possible_mat_ids, key=lambda doc: ID_to_int(doc["task_id"]))
-    ]
+    possible_mat_ids = [prop["task_id"] for prop in sorted(possible_mat_ids, key=lambda doc: ID_to_int(doc["task_id"]))]
 
     if len(possible_mat_ids) == 0:
         return None
@@ -426,20 +394,10 @@ def find_best_prop(props):
     """
 
     # Sort for highest quality score and lowest energy
-    sorted_props = sorted(
-        props,
-        key=lambda doc: (
-            -1 * doc["is_valid"],
-            -1 * doc["quality_score"],
-            doc["energy"],
-        ),
-    )
+    sorted_props = sorted(props, key=lambda doc: (-1 * doc["is_valid"], -1 * doc["quality_score"], doc["energy"],),)
     if sorted_props[0].get("aggregate", False):
         # Make this a list of lists and then flatten to deal with mixed value typing
-        vals = [
-            prop["value"] if isinstance(prop["value"], list) else [prop["value"]]
-            for prop in sorted_props
-        ]
+        vals = [prop["value"] if isinstance(prop["value"], list) else [prop["value"]] for prop in sorted_props]
         vals = list(chain.from_iterable(vals))
         prop = sorted_props[0]
         prop["value"] = vals
@@ -474,12 +432,7 @@ def structure_metadata(structure):
 
 
 def group_structures(
-    structures,
-    ltol=LTOL,
-    stol=STOL,
-    angle_tol=ANGLE_TOL,
-    symprec=SYMPREC,
-    separate_mag_orderings=False,
+    structures, ltol=LTOL, stol=STOL, angle_tol=ANGLE_TOL, symprec=SYMPREC, separate_mag_orderings=False,
 ):
     """
     Groups structures according to space group and structure matching
@@ -523,9 +476,7 @@ def group_structures(
 
             # Match magnetic orderings here
             if separate_mag_orderings:
-                for _, mag_group in groupby(
-                    sorted(group, key=get_mag_ordering), key=get_mag_ordering
-                ):
+                for _, mag_group in groupby(sorted(group, key=get_mag_ordering), key=get_mag_ordering):
                     yield list(mag_group)
             else:
                 yield group
