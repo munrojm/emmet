@@ -40,6 +40,8 @@ class BSDOSBuilder(Builder):
 
         super().__init__(sources=[tasks, materials, bandstructures, dos], targets=[electronic_structure], **kwargs)
 
+        self.chunk_size = 10
+
     def get_items(self):
         """
         Gets all items to process
@@ -74,125 +76,7 @@ class BSDOSBuilder(Builder):
 
         self.total = len(mats)
 
-        # find bs type for each task in task_type and store each different bs object
-        for m in mats:
-
-            mat = self.materials.query_one(
-                properties=[self.materials.key, "structure", "inputs", "task_types", self.materials.last_updated_field],
-                criteria={self.materials.key: m},
-            )
-            mat["dos"] = {}
-            mat["bandstructure"] = {"sc": {}, "lm": {}, "hin": {}}
-
-            seen_bs_data = {"sc": [], "lm": [], "hin": []}
-            seen_dos_data = []
-
-            for task_id in mat["task_types"].keys():
-                # obtain all bs calcs, their type, and last updated
-                if "NSCF Line" in mat["task_types"][task_id]:
-
-                    bs_type = None
-
-                    task_query = self.tasks.query_one(
-                        properties=["last_updated", "input.is_hubbard", "orig_inputs.kpoints"],
-                        criteria={"task_id": int(task_id)},
-                    )
-
-                    bs = self.bandstructures.query_one(criteria={"metadata.task_id": int(task_id)})
-
-                    structure = Structure.from_dict(bs["structure"])
-
-                    bs_labels = bs["labels_dict"]
-
-                    # - Find path type
-                    if any([label.islower() for label in bs_labels]):
-                        bs_type = "lm"
-                    else:
-                        for ptype in ["sc", "hin"]:
-                            hskp = HighSymmKpath(
-                                structure,
-                                has_magmoms=False,
-                                magmom_axis=None,
-                                path_type=ptype,
-                                symprec=0.1,
-                                angle_tolerance=5,
-                                atol=1e-5,
-                            )
-                            hs_labels_full = hskp.kpath["kpoints"]
-                            hs_path_uniq = set([label for segment in hskp.kpath["path"] for label in segment])
-
-                            hs_labels = {k: hs_labels_full[k] for k in hs_path_uniq if k in hs_path_uniq}
-
-                            shared_items = {
-                                k: bs_labels[k]
-                                for k in bs_labels
-                                if k in hs_labels and np.allclose(bs_labels[k], hs_labels[k], atol=1e-3)
-                            }
-
-                            if len(shared_items) == len(bs_labels) and len(shared_items) == len(hs_labels):
-                                bs_type = ptype
-
-                    is_hubbard = task_query["input"]["is_hubbard"]
-                    nkpoints = task_query["orig_inputs"]["kpoints"]["nkpoints"]
-                    lu_dt = task_query["last_updated"]
-
-                    if bs_type is not None:
-                        seen_bs_data[bs_type].append(
-                            {
-                                "task_id": str(task_id),
-                                "is_hubbard": int(is_hubbard),
-                                "nkpoints": int(nkpoints),
-                                "updated_on": lu_dt,
-                            }
-                        )
-
-                # Handle uniform tasks
-                if "NSCF Uniform" in mat["task_types"][task_id]:
-                    task_query = self.tasks.query_one(
-                        properties=["last_updated", "input.is_hubbard", "orig_inputs.kpoints"],
-                        criteria={"task_id": int(task_id)},
-                    )
-
-                    is_hubbard = task_query["input"]["is_hubbard"]
-                    nkpoints = task_query["orig_inputs"]["kpoints"]["nkpoints"]
-                    lu_dt = task_query["last_updated"]
-
-                    seen_dos_data.append(
-                        {
-                            "task_id": str(task_id),
-                            "is_hubbard": int(is_hubbard),
-                            "nkpoints": int(nkpoints),
-                            "updated_on": lu_dt,
-                        }
-                    )
-
-            for bs_type in mat["bandstructure"]:
-                # select "blessed" bs of each type
-                if seen_bs_data[bs_type]:
-                    sorted_data = sorted(
-                        seen_bs_data[bs_type],
-                        key=lambda entry: (entry["is_hubbard"], entry["nkpoints"], entry["updated_on"]),
-                        reverse=True,
-                    )
-
-                    mat["bandstructure"][bs_type]["task_id"] = int(sorted_data[0]["task_id"])
-                    mat["bandstructure"][bs_type]["data"] = self.bandstructures.query_one(
-                        criteria={"metadata.task_id": int(sorted_data[0]["task_id"])}
-                    )
-
-            if seen_dos_data:
-
-                sorted_dos_data = sorted(
-                    seen_dos_data,
-                    key=lambda entry: (entry["is_hubbard"], entry["nkpoints"], entry["updated_on"]),
-                    reverse=True,
-                )
-
-                mat["dos"]["task_id"] = int(sorted_dos_data[0]["task_id"])
-                mat["dos"]["data"] = self.dos.query_one(
-                    criteria={"metadata.task_id": int(sorted_dos_data[0]["task_id"])}
-                )
-
+        for mat in mats:
             yield mat
 
     def process_item(self, mat):
@@ -205,6 +89,8 @@ class BSDOSBuilder(Builder):
         Returns:
             (dict): electronic_structure document
         """
+
+        mat = self._update_mat(mat)
 
         structure = Structure.from_dict(mat["structure"])
 
@@ -371,6 +257,125 @@ class BSDOSBuilder(Builder):
                     (cbm, vbm) = proj_dos[label].get_cbm_vbm(spin=Spin.up)
                     d["dos"]["elements"][str(ele)][str(orbital)]["cbm"][Spin.up] = cbm
                     d["dos"]["elements"][str(ele)][str(orbital)]["vbm"][Spin.up] = vbm
+
+    def _update_mat(self, mat):
+        # find bs type for each task in task_type and store each different bs object
+
+        mat = self.materials.query_one(
+            properties=[self.materials.key, "structure", "inputs", "task_types", self.materials.last_updated_field],
+            criteria={self.materials.key: mat},
+        )
+        mat["dos"] = {}
+        mat["bandstructure"] = {"sc": {}, "lm": {}, "hin": {}}
+
+        seen_bs_data = {"sc": [], "lm": [], "hin": []}
+        seen_dos_data = []
+
+        for task_id in mat["task_types"].keys():
+            # obtain all bs calcs, their type, and last updated
+            if "NSCF Line" in mat["task_types"][task_id]:
+
+                bs_type = None
+
+                task_query = self.tasks.query_one(
+                    properties=["last_updated", "input.is_hubbard", "orig_inputs.kpoints"],
+                    criteria={"task_id": int(task_id)},
+                )
+
+                bs = self.bandstructures.query_one(criteria={"metadata.task_id": int(task_id)})
+
+                structure = Structure.from_dict(bs["structure"])
+
+                bs_labels = bs["labels_dict"]
+
+                # - Find path type
+                if any([label.islower() for label in bs_labels]):
+                    bs_type = "lm"
+                else:
+                    for ptype in ["sc", "hin"]:
+                        hskp = HighSymmKpath(
+                            structure,
+                            has_magmoms=False,
+                            magmom_axis=None,
+                            path_type=ptype,
+                            symprec=0.1,
+                            angle_tolerance=5,
+                            atol=1e-5,
+                        )
+                        hs_labels_full = hskp.kpath["kpoints"]
+                        hs_path_uniq = set([label for segment in hskp.kpath["path"] for label in segment])
+
+                        hs_labels = {k: hs_labels_full[k] for k in hs_path_uniq if k in hs_path_uniq}
+
+                        shared_items = {
+                            k: bs_labels[k]
+                            for k in bs_labels
+                            if k in hs_labels and np.allclose(bs_labels[k], hs_labels[k], atol=1e-3)
+                        }
+
+                        if len(shared_items) == len(bs_labels) and len(shared_items) == len(hs_labels):
+                            bs_type = ptype
+
+                is_hubbard = task_query["input"]["is_hubbard"]
+                nkpoints = task_query["orig_inputs"]["kpoints"]["nkpoints"]
+                lu_dt = task_query["last_updated"]
+
+                if bs_type is not None:
+                    seen_bs_data[bs_type].append(
+                        {
+                            "task_id": str(task_id),
+                            "is_hubbard": int(is_hubbard),
+                            "nkpoints": int(nkpoints),
+                            "updated_on": lu_dt,
+                        }
+                    )
+
+            # Handle uniform tasks
+            if "NSCF Uniform" in mat["task_types"][task_id]:
+                task_query = self.tasks.query_one(
+                    properties=["last_updated", "input.is_hubbard", "orig_inputs.kpoints"],
+                    criteria={"task_id": int(task_id)},
+                )
+
+                is_hubbard = task_query["input"]["is_hubbard"]
+                nkpoints = task_query["orig_inputs"]["kpoints"]["nkpoints"]
+                lu_dt = task_query["last_updated"]
+
+                seen_dos_data.append(
+                    {
+                        "task_id": str(task_id),
+                        "is_hubbard": int(is_hubbard),
+                        "nkpoints": int(nkpoints),
+                        "updated_on": lu_dt,
+                    }
+                )
+
+        for bs_type in mat["bandstructure"]:
+            # select "blessed" bs of each type
+            if seen_bs_data[bs_type]:
+                sorted_data = sorted(
+                    seen_bs_data[bs_type],
+                    key=lambda entry: (entry["is_hubbard"], entry["nkpoints"], entry["updated_on"]),
+                    reverse=True,
+                )
+
+                mat["bandstructure"][bs_type]["task_id"] = int(sorted_data[0]["task_id"])
+                mat["bandstructure"][bs_type]["data"] = self.bandstructures.query_one(
+                    criteria={"metadata.task_id": int(sorted_data[0]["task_id"])}
+                )
+
+        if seen_dos_data:
+
+            sorted_dos_data = sorted(
+                seen_dos_data,
+                key=lambda entry: (entry["is_hubbard"], entry["nkpoints"], entry["updated_on"]),
+                reverse=True,
+            )
+
+            mat["dos"]["task_id"] = int(sorted_dos_data[0]["task_id"])
+            mat["dos"]["data"] = self.dos.query_one(criteria={"metadata.task_id": int(sorted_dos_data[0]["task_id"])})
+
+        return mat
 
 
 class BSDOSPlotBuilder:
