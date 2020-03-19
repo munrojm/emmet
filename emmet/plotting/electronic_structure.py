@@ -191,7 +191,7 @@ class BSDOSBuilder(Builder):
             kpath_labels = set([kpoint.label for kpoint in bs.kpoints if kpoint.label is not None])
 
             if not gen_labels.issubset(kpath_labels):
-                new_structure = SpacegroupAnalyzer(bs.struct).get_primitive_standard_structure(
+                new_structure = SpacegroupAnalyzer(bs.structure).get_primitive_standard_structure(
                     international_monoclinic=False
                 )
 
