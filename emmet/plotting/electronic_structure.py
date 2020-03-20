@@ -63,19 +63,16 @@ class BSDOSBuilder(Builder):
         # get all materials that were updated since the electronic structure was last updated
         # and there is either a dos or bandstructure
         q = dict(self.query)
-        q.update(
-            {
-                self.materials.last_updated_field: {
-                    "$gt": self.materials._lu_func[1](self.electronic_structure.last_updated)
-                }
-            }
-        )
-        q["$and"] = [{"bandstructure.bs_task": {"$exists": 1}}, {"bandstructure.dos_task": {"$exists": 1}}]
-        mats = [
-            mat for mat in set(self.materials.distinct(self.materials.key, criteria=q)) | (set(mat_ids) - set(es_ids))
-        ]
 
-        chunk_size = 100
+        q["$and"] = [{"bandstructure.bs_task": {"$exists": 1}}, {"bandstructure.dos_task": {"$exists": 1}}]
+
+        mats_set = set(self.electronic_structure.newer_in(target=self.materials, criteria=q, exhaustive=True)) | (
+            set(mat_ids) - set(es_ids)
+        )
+
+        mats = [mat for mat in mats_set]
+
+        chunk_size = 2
         mats_chunked = [mats[i : i + chunk_size] for i in range(0, len(mats), chunk_size)]
 
         self.logger.debug("Processing {} materials for electronic structure".format(len(mats)))
@@ -119,7 +116,7 @@ class BSDOSBuilder(Builder):
             bs_data = {"total": {"band_gap": {}, "cbm": {}, "vbm": {}}}
 
             d = {
-                self.electronic_structure.key: str(mat[self.materials.key]),
+                self.electronic_structure.key: mat[self.materials.key],
                 "bandstructure": {
                     "sc": copy.deepcopy(bs_data),
                     "lm": copy.deepcopy(bs_data),
@@ -135,7 +132,7 @@ class BSDOSBuilder(Builder):
             type_available = [bs_type for bs_type in mat["bandstructure"].keys() if mat["bandstructure"][bs_type]]
             self.logger.info("Processing band structure types: {}".format(type_available))
 
-            for bs_type in type_available:
+            for index, bs_type in enumerate(type_available):
 
                 bs = BandStructureSymmLine.from_dict(mat["bandstructure"][bs_type]["data"])
                 is_sp = bs.is_spin_polarized
@@ -146,10 +143,10 @@ class BSDOSBuilder(Builder):
                 d["bandstructure"][bs_type]["total"]["cbm"] = bs.get_cbm()
                 d["bandstructure"][bs_type]["total"]["vbm"] = bs.get_vbm()
 
-                self._process_bs(d=d, bs=bs, bs_type=bs_type)
+                self._process_bs(d=d, bs=bs, bs_type=bs_type, skip="lm" not in type_available)
 
                 # -- Get total and projected dos data and traces
-                if bs_type == "sc":
+                if index == 0:
                     d["dos"]["task_id"] = mat["dos"]["task_id"]
                     self._process_dos(d=d, dos=dos, spin_polarized=is_sp)
 
@@ -158,7 +155,6 @@ class BSDOSBuilder(Builder):
                 **structure_metadata,
                 **d,
             }
-
             d_list.append(d)
 
         return d_list
@@ -178,27 +174,28 @@ class BSDOSBuilder(Builder):
         else:
             self.logger.info("No electronic structure docs to update")
 
-    @staticmethod
-    def _process_bs(d, bs, bs_type):
+    def _process_bs(self, d, bs, bs_type, skip):
 
-        # -- Get equivalent labels between different conventions
+        if not skip:
+            # -- Get equivalent labels between different conventions
+            hskp = HighSymmKpath(bs.structure, path_type="all", symprec=0.1, angle_tolerance=5, atol=1e-5)
+            eq_labels = hskp.equiv_labels
 
-        hskp = HighSymmKpath(bs.structure, path_type="all", symprec=0.1, angle_tolerance=5, atol=1e-5)
-        eq_labels = hskp.equiv_labels
+            if bs_type == "lm":
+                gen_labels = set([label for label in eq_labels["lm"]["sc"]])
+                kpath_labels = set([kpoint.label for kpoint in bs.kpoints if kpoint.label is not None])
 
-        if bs_type == "lm":
-            gen_labels = set([label for label in eq_labels["lm"]["sc"]])
-            kpath_labels = set([kpoint.label for kpoint in bs.kpoints if kpoint.label is not None])
+                if not gen_labels.issubset(kpath_labels):
+                    new_structure = SpacegroupAnalyzer(bs.structure).get_primitive_standard_structure(
+                        international_monoclinic=False
+                    )
 
-            if not gen_labels.issubset(kpath_labels):
-                new_structure = SpacegroupAnalyzer(bs.structure).get_primitive_standard_structure(
-                    international_monoclinic=False
-                )
+                    hskp = HighSymmKpath(new_structure, path_type="all", symprec=0.1, angle_tolerance=5, atol=1e-5)
+                    eq_labels = hskp.equiv_labels
 
-                hskp = HighSymmKpath(new_structure, path_type="all", symprec=0.1, angle_tolerance=5, atol=1e-5)
-                eq_labels = hskp.equiv_labels
-
-        d["bandstructure"][bs_type]["total"]["equiv_labels"] = eq_labels[bs_type]
+            d["bandstructure"][bs_type]["total"]["equiv_labels"] = eq_labels[bs_type]
+        else:
+            d["bandstructure"][bs_type]["total"]["equiv_labels"] = {}
 
     @staticmethod
     def _process_dos(d, dos, spin_polarized):
@@ -363,6 +360,7 @@ class BSDOSBuilder(Builder):
                             )
                 except:
                     problem_tasks.append(task_id)
+                    pass
 
                 # Handle uniform tasks
                 if "NSCF Uniform" in mat["task_types"][task_id]:
@@ -413,7 +411,6 @@ class BSDOSBuilder(Builder):
 
             mats_updated.append(mat)
 
-        self.logger.debug(problem_tasks)
         return mats_updated
 
 
