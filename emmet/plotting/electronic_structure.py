@@ -72,7 +72,7 @@ class BSDOSBuilder(Builder):
 
         mats = [mat for mat in mats_set]
 
-        chunk_size = 2
+        chunk_size = 10
         mats_chunked = [mats[i : i + chunk_size] for i in range(0, len(mats), chunk_size)]
 
         self.logger.debug("Processing {} materials for electronic structure".format(len(mats)))
