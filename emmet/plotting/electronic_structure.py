@@ -206,7 +206,7 @@ class BSDOSBuilder(Builder):
 
         for ele in ele_dos.keys():
             d["dos"]["elements"][str(ele)] = {}
-            for sub_label in ["total", "s", "p", "d"]:
+            for sub_label in ["total", "s", "p", "d", "f"]:
                 d["dos"]["elements"][str(ele)][sub_label] = {"band_gap": {}, "cbm": {}, "vbm": {}}
 
         if spin_polarized:
