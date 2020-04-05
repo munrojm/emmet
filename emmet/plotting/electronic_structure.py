@@ -1,6 +1,7 @@
 import io
 import traceback
 from datetime import datetime
+from bson.objectid import ObjectId
 from maggma.builders import Builder
 from pymatgen import Structure
 from pymatgen.symmetry.analyzer import SpacegroupAnalyzer
@@ -547,25 +548,16 @@ class BSCopyBuilder(Builder):
 
         # All task_ids
 
-        bs_ids = self.bandstructures.distinct(field="metadata.task_id", criteria=q)
-        s3_ids = self.s3.distinct(field=self.s3.key, criteria=q)
+        bs_oids = self.bandstructures.distinct(field="_id", criteria=q)
+        s3_oids = [
+            ObjectId(entry) for entry in self.s3.distinct(field="gridfs_id", criteria=q)
+        ]
 
-        # Get all materials that were updated since the last copy
-
-        criteria = {
-            self.bandstructures.last_updated_field: {
-                "$gt": self.s3._lu_func[1](self.s3.last_updated)
-            }
-        }
-        q.update(criteria)
-
-        bs_set = set(
-            self.bandstructures.distinct(field="metadata.task_id", criteria=q)
-        ) | (set(bs_ids) - set(s3_ids))
+        bs_set = set(bs_oids) - set(s3_oids)
 
         bs_list = [key for key in bs_set]
 
-        chunk_size = 10
+        chunk_size = 1
         bs_chunked = [
             bs_list[i : i + chunk_size] for i in range(0, len(bs_list), chunk_size)
         ]
@@ -577,21 +569,18 @@ class BSCopyBuilder(Builder):
         self.total = len(bs_chunked)
 
         for chunk in bs_chunked:
-            self.logger.debug(chunk)
             self.logger.debug("Handling keys: {}".format(chunk))
             data = []
             for entry in chunk:
                 metadata = self.bandstructures._files_store.query_one(
-                    criteria={"metadata.task_id": int(entry)}, properties=["uploadDate"]
+                    criteria={"_id": entry}, properties=["metadata", "uploadDate"],
                 )
                 data.append(
                     {
-                        "_id": metadata["_id"],
-                        "task_id": str(entry),
-                        "last_updated": metadata["uploadDate"],
-                        "bs": self.bandstructures.query_one(
-                            criteria={"metadata.task_id": int(entry)}
-                        ),
+                        "gridfs_id": str(metadata["_id"]),
+                        "task_id": str(metadata["metadata"]["task_id"]),
+                        self.s3.last_updated_field: metadata["uploadDate"],
+                        "bs": self.bandstructures.query_one(criteria={"_id": entry}),
                     }
                 )
 
@@ -615,44 +604,44 @@ class BSCopyBuilder(Builder):
 
             bs_labels = entry["bs"]["labels_dict"]
 
-            # - Find path type
+            bs_type = "unknown"
+
             if any([label.islower() for label in bs_labels]):
                 bs_type = "lm"
             else:
-                hskp = HighSymmKpath(
-                    structure,
-                    has_magmoms=False,
-                    magmom_axis=None,
-                    path_type="sc",
-                    symprec=0.1,
-                    angle_tolerance=5,
-                    atol=1e-5,
-                )
-                hs_labels_full = hskp.kpath["kpoints"]
-                hs_path_uniq = set(
-                    [label for segment in hskp.kpath["path"] for label in segment]
-                )
+                for ptype in ["sc", "hin"]:
+                    hskp = HighSymmKpath(
+                        structure,
+                        has_magmoms=False,
+                        magmom_axis=None,
+                        path_type=ptype,
+                        symprec=0.1,
+                        angle_tolerance=5,
+                        atol=1e-5,
+                    )
+                    hs_labels_full = hskp.kpath["kpoints"]
+                    hs_path_uniq = set(
+                        [label for segment in hskp.kpath["path"] for label in segment]
+                    )
 
-                hs_labels = {
-                    k: hs_labels_full[k] for k in hs_path_uniq if k in hs_path_uniq
-                }
+                    hs_labels = {
+                        k: hs_labels_full[k] for k in hs_path_uniq if k in hs_path_uniq
+                    }
 
-                shared_items = {
-                    k: bs_labels[k]
-                    for k in bs_labels
-                    if k in hs_labels
-                    and np.allclose(bs_labels[k], hs_labels[k], atol=1e-3)
-                }
+                    shared_items = {
+                        k: bs_labels[k]
+                        for k in bs_labels
+                        if k in hs_labels
+                        and np.allclose(bs_labels[k], hs_labels[k], atol=1e-3)
+                    }
 
-                if len(shared_items) == len(bs_labels) and len(shared_items) == len(
-                    hs_labels
-                ):
-                    bs_type = "sc"
-                else:
-                    bs_type = "hin"
+                    if len(shared_items) == len(bs_labels) and len(shared_items) == len(
+                        hs_labels
+                    ):
+                        bs_type = ptype
 
             d = {
-                "_id": entry["_id"],
+                "gridfs_id": entry["gridfs_id"],
                 "data": entry["bs"],
                 "mode": "line",
                 "task_id": entry["task_id"],
@@ -663,7 +652,7 @@ class BSCopyBuilder(Builder):
                 "min_energy": str(min_energy),
                 "max_energy": str(max_energy),
                 "num_uniq_elements": str(num_uniq_elements),
-                "last_updated": str(entry["last_updated"]),
+                self.s3.last_updated_field: entry["last_updated"],
             }
 
             dlist.append(d)
