@@ -1,7 +1,13 @@
 import io
+import os
 import traceback
+import json
 from datetime import datetime
 from bson.objectid import ObjectId
+import msgpack
+import zlib
+from monty.msgpack import default as monty_default
+from hashlib import md5
 from maggma.builders import Builder
 from pymatgen import Structure
 from pymatgen.symmetry.analyzer import SpacegroupAnalyzer
@@ -564,5 +570,190 @@ class BSCopyBuilder(Builder):
             self.logger.info("No band structure to copy")
 
 
-class BSDOSPlotBuilder:
-    pass
+class BSFileCopyBuilder(Builder):
+    def __init__(self, tasks, bandstructures, s3, meta_dir, target_dir, query=None, **kwargs):
+        """
+        Copies band structure and dos objects from mongodb to a minio bucket via direct direct file copy
+        
+        meta_dir (str): Directory for minio metadata
+        target_dir (str): Directory for minio data
+        bandstructures : Store of band structure documents
+        s3  (Store) : S3 store defining minio index
+        query (dict): dictionary to limit bandstructures to be analyzed
+        """
+        self.s3 = s3
+        self.tasks = tasks
+        self.bandstructures = bandstructures
+        self.meta_dir = meta_dir
+        self.target_dir = target_dir
+        self.query = query if query else {}
+        self.s3.write_to_s3_in_process_items = True
+
+        super().__init__(sources=[self.tasks, self.bandstructures], targets=[self.s3], **kwargs)
+
+        self.chunk_size = 5
+
+    def get_items(self):
+        """
+        Gets all items to process
+
+        Returns:
+            list relevant bandstructure and dos objects
+        """
+
+        self.logger.info("Electronic Structure Copy Builder Started")
+
+        q = dict(self.query)
+
+        # All task_ids
+        
+        task_oids = self.tasks.distinct(field="calcs_reversed.0.bandstructure_fs_id", criteria={"task_label": "nscf uniform"}) # only line-modes for now
+        bs_oids = self.bandstructures.distinct(field="_id", criteria=q)
+        s3_oids = [ObjectId(entry) for entry in self.s3.distinct(field="gridfs_id", criteria=q)]
+
+        bs_set = set(bs_oids) - set(task_oids) - set(s3_oids)
+
+        bs_list = [key for key in bs_set]
+
+        self.logger.debug("Processing {} bandstructure objects for copying".format(len(bs_list)))
+
+        self.total = len(bs_list)
+
+        for entry in bs_list:
+            metadata = self.bandstructures._files_store.query_one(
+                criteria={"_id": entry}, properties=["metadata", "uploadDate"],
+            )
+            data = {
+                "gridfs_id": str(metadata["_id"]),
+                "task_id": str(metadata["metadata"]["task_id"]),
+                self.s3.last_updated_field: metadata["uploadDate"],
+                "bs": self.bandstructures.query_one(criteria={"_id": entry}),
+            }
+
+            yield data
+
+    def process_item(self, entry):
+
+        bs = BandStructureSymmLine.from_dict(entry["bs"])
+        spin_polarized = bs.is_spin_polarized
+        num_bands = bs.nb_bands
+        efermi = bs.efermi
+
+        keys = bs.bands.keys()
+        
+        min_energy = min([min(np.ndarray.flatten(bs.bands[key])) for key in keys])
+        max_energy = max([max(np.ndarray.flatten(bs.bands[key])) for key in keys])
+
+        num_uniq_elements = len(set([site.species_string for site in bs.structure]))
+
+        structure = Structure.from_dict(entry["bs"]["structure"])
+
+        bs_labels = entry["bs"]["labels_dict"]
+
+        bs_type = "unknown"
+
+        if any([label.islower() for label in bs_labels]):
+            bs_type = "lm"
+        else:
+            for ptype in ["sc", "hin"]:
+                hskp = HighSymmKpath(
+                    structure,
+                    has_magmoms=False,
+                    magmom_axis=None,
+                    path_type=ptype,
+                    symprec=0.1,
+                    angle_tolerance=5,
+                    atol=1e-5,
+                )
+                hs_labels_full = hskp.kpath["kpoints"]
+                hs_path_uniq = set([label for segment in hskp.kpath["path"] for label in segment])
+
+                hs_labels = {k: hs_labels_full[k] for k in hs_path_uniq if k in hs_path_uniq}
+
+                shared_items = {
+                    k: bs_labels[k]
+                    for k in bs_labels
+                    if k in hs_labels and np.allclose(bs_labels[k], hs_labels[k], atol=1e-3)
+                }
+
+                if len(shared_items) == len(bs_labels) and len(shared_items) == len(hs_labels):
+                    bs_type = ptype
+
+        search_doc = {
+            "gridfs_id": entry["gridfs_id"],
+            "mode": "line",
+            "task_id": entry["task_id"],
+            "spin_polarized": str(spin_polarized),
+            "num_bands": str(num_bands),
+            "path_type": bs_type,
+            "efermi": str(efermi),
+            "min_energy": str(min_energy),
+            "max_energy": str(max_energy),
+            "num_uniq_elements": str(num_uniq_elements),
+            self.s3.last_updated_field: entry["last_updated"],
+        }
+
+        data = {
+            "gridfs_id": entry["gridfs_id"],
+            "data": entry["bs"],
+            "mode": "line",
+            "task_id": entry["task_id"],
+            "path_type": bs_type,
+        }
+
+        if self.target_dir is not None:
+            data = msgpack.packb(data, default=monty_default)
+            if self.s3.compress:
+                search_doc["compression"] = "zlib"
+                data = zlib.compress(data)
+
+            meta_json = {
+                    "version": "1.0.2",
+                    "checksum": {
+                        "algorithm": "",
+                        "blocksize": 0,
+                        "hashes": None
+                        },
+                    "meta": {
+                        "content-type": "application/octet-stream",
+                        "etag": calc_etag(data)
+                        }
+                    }
+
+            if not os.path.exists(f"{self.meta_dir}/{self.s3.sub_dir}/{search_doc['gridfs_id']}"):
+                os.makedirs(f"{self.meta_dir}/{self.s3.sub_dir}/{search_doc['gridfs_id']}")
+            with open(f"{self.meta_dir}/{self.s3.sub_dir}/{search_doc['gridfs_id']}/fs.json", 'w') as outfile:
+                json.dump(meta_json, outfile)
+            
+            if not os.path.exists(f"{self.target_dir}/{self.s3.sub_dir}"):
+                os.makedirs(f"{self.target_dir}/{self.s3.sub_dir}")
+            with open(
+                f"{self.target_dir}/{self.s3.sub_dir}/{search_doc['gridfs_id']}",
+                "wb",
+            ) as outfile:
+                outfile.write(data)
+                data = None
+
+        return search_doc
+
+    def update_targets(self, items):
+        """
+        Update minio index store with metadata
+
+        Args:
+            items ([([dict],[int])]): A list of tuples of materials to update and the corresponding processed task_ids
+        """
+        items = list(filter(None, items))
+
+        if len(items) > 0:
+            self.logger.info("Uploading {} band structures".format(len(items)))
+            self.s3.update(items, key=[key for key in items[0] if key != "data"])
+        else:
+            self.logger.info("No band structure to copy")
+
+def calc_etag(input_data):
+    m = md5()
+    chunk_size = 1024 * 1024
+    for i in range(0, len(input_data), chunk_size):
+        m.update(input_data[i:i+chunk_size])
+    return m.hexdigest()
