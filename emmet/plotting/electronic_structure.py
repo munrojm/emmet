@@ -23,11 +23,19 @@ __author__ = "Jason Munro <jmunro@lbl.gov>"
 
 
 class BSDOSBuilder(Builder):
-    def __init__(self, tasks, materials, electronic_structure, bandstructures, dos, query=None, **kwargs):
+    def __init__(
+        self,
+        tasks,
+        materials,
+        electronic_structure,
+        bandstructures,
+        dos,
+        query=None,
+        **kwargs,
+    ):
         """
         Creates an electronic structure from a tasks collection, the associated band structures and density of states, and the materials structure
 
-        This explicitly acts on bandstructure documents generated for the 'all' path type in HighSymmKpath.
         Individual bandstructures for each of the three conventions are generated.
 
         Really only usefull for MP Website infrastructure right now.
@@ -46,7 +54,11 @@ class BSDOSBuilder(Builder):
         self.dos = dos
         self.query = query if query else {}
 
-        super().__init__(sources=[tasks, materials, bandstructures, dos], targets=[electronic_structure], **kwargs)
+        super().__init__(
+            sources=[tasks, materials, bandstructures, dos],
+            targets=[electronic_structure],
+            **kwargs,
+        )
 
         self.chunk_size = 1
 
@@ -79,16 +91,22 @@ class BSDOSBuilder(Builder):
             {"bandstructure.dos_task": {"$exists": 1}},
         ]
 
-        mats_set = set(self.electronic_structure.newer_in(target=self.materials, criteria=q, exhaustive=True)) | (
-            set(mat_ids) - set(es_ids)
-        )
+        mats_set = set(
+            self.electronic_structure.newer_in(
+                target=self.materials, criteria=q, exhaustive=True
+            )
+        ) | (set(mat_ids) - set(es_ids))
 
         mats = [mat for mat in mats_set]
 
         chunk_size = 10
-        mats_chunked = [mats[i : i + chunk_size] for i in range(0, len(mats), chunk_size)]
+        mats_chunked = [
+            mats[i : i + chunk_size] for i in range(0, len(mats), chunk_size)
+        ]
 
-        self.logger.debug("Processing {} materials for electronic structure".format(len(mats)))
+        self.logger.debug(
+            "Processing {} materials for electronic structure".format(len(mats))
+        )
 
         self.total = len(mats_chunked)
 
@@ -142,21 +160,33 @@ class BSDOSBuilder(Builder):
 
             dos = CompleteDos.from_dict(mat["dos"]["data"])
 
-            type_available = [bs_type for bs_type in mat["bandstructure"].keys() if mat["bandstructure"][bs_type]]
-            self.logger.info("Processing band structure types: {}".format(type_available))
+            type_available = [
+                bs_type
+                for bs_type in mat["bandstructure"].keys()
+                if mat["bandstructure"][bs_type]
+            ]
+            self.logger.info(
+                "Processing band structure types: {}".format(type_available)
+            )
 
             for index, bs_type in enumerate(type_available):
 
-                bs = BandStructureSymmLine.from_dict(mat["bandstructure"][bs_type]["data"])
+                bs = BandStructureSymmLine.from_dict(
+                    mat["bandstructure"][bs_type]["data"]
+                )
                 is_sp = bs.is_spin_polarized
 
                 # -- Get total and projected band structure data and traces
-                d["bandstructure"][bs_type]["task_id"] = mat["bandstructure"][bs_type]["task_id"]
+                d["bandstructure"][bs_type]["task_id"] = mat["bandstructure"][bs_type][
+                    "task_id"
+                ]
                 d["bandstructure"][bs_type]["total"]["band_gap"] = bs.get_band_gap()
                 d["bandstructure"][bs_type]["total"]["cbm"] = bs.get_cbm()
                 d["bandstructure"][bs_type]["total"]["vbm"] = bs.get_vbm()
 
-                self._process_bs(d=d, bs=bs, bs_type=bs_type, skip="lm" not in type_available)
+                self._process_bs(
+                    d=d, bs=bs, bs_type=bs_type, skip="lm" not in type_available
+                )
 
                 # -- Get total and projected dos data and traces
                 if index == 0:
@@ -164,7 +194,9 @@ class BSDOSBuilder(Builder):
                     self._process_dos(d=d, dos=dos, spin_polarized=is_sp)
 
             d = {
-                self.electronic_structure.last_updated_field: mat[self.materials.last_updated_field],
+                self.electronic_structure.last_updated_field: mat[
+                    self.materials.last_updated_field
+                ],
                 **structure_metadata,
                 **d,
             }
@@ -191,19 +223,29 @@ class BSDOSBuilder(Builder):
 
         if not skip:
             # -- Get equivalent labels between different conventions
-            hskp = HighSymmKpath(bs.structure, path_type="all", symprec=0.1, angle_tolerance=5, atol=1e-5)
+            hskp = HighSymmKpath(
+                bs.structure, path_type="all", symprec=0.1, angle_tolerance=5, atol=1e-5
+            )
             eq_labels = hskp.equiv_labels
 
             if bs_type == "lm":
                 gen_labels = set([label for label in eq_labels["lm"]["sc"]])
-                kpath_labels = set([kpoint.label for kpoint in bs.kpoints if kpoint.label is not None])
+                kpath_labels = set(
+                    [kpoint.label for kpoint in bs.kpoints if kpoint.label is not None]
+                )
 
                 if not gen_labels.issubset(kpath_labels):
-                    new_structure = SpacegroupAnalyzer(bs.structure).get_primitive_standard_structure(
-                        international_monoclinic=False
-                    )
+                    new_structure = SpacegroupAnalyzer(
+                        bs.structure
+                    ).get_primitive_standard_structure(international_monoclinic=False)
 
-                    hskp = HighSymmKpath(new_structure, path_type="all", symprec=0.1, angle_tolerance=5, atol=1e-5,)
+                    hskp = HighSymmKpath(
+                        new_structure,
+                        path_type="all",
+                        symprec=0.1,
+                        angle_tolerance=5,
+                        atol=1e-5,
+                    )
                     eq_labels = hskp.equiv_labels
 
             d["bandstructure"][bs_type]["total"]["equiv_labels"] = eq_labels[bs_type]
@@ -236,7 +278,9 @@ class BSDOSBuilder(Builder):
 
                 # - Process total orbital projection data
                 for o_ind, orbital in enumerate(orbitals):
-                    d["dos"]["orbitals"][str(orbital)]["band_gap"][spin] = tot_orb_dos[orbital].get_gap(spin=spin)
+                    d["dos"]["orbitals"][str(orbital)]["band_gap"][spin] = tot_orb_dos[
+                        orbital
+                    ].get_gap(spin=spin)
                     (cbm, vbm) = tot_orb_dos[orbital].get_cbm_vbm(spin=spin)
                     d["dos"]["orbitals"][str(orbital)]["cbm"][spin] = cbm
                     d["dos"]["orbitals"][str(orbital)]["vbm"][spin] = vbm
@@ -254,9 +298,9 @@ class BSDOSBuilder(Builder):
                         label = orbital
 
                     for spin in [Spin.down, Spin.up]:
-                        d["dos"]["elements"][str(ele)][str(orbital)]["band_gap"][spin] = proj_dos[label].get_gap(
-                            spin=spin
-                        )
+                        d["dos"]["elements"][str(ele)][str(orbital)]["band_gap"][
+                            spin
+                        ] = proj_dos[label].get_gap(spin=spin)
                         (cbm, vbm) = proj_dos[label].get_cbm_vbm(spin=spin)
                         d["dos"]["elements"][str(ele)][str(orbital)]["cbm"][spin] = cbm
                         d["dos"]["elements"][str(ele)][str(orbital)]["vbm"][spin] = vbm
@@ -270,7 +314,9 @@ class BSDOSBuilder(Builder):
 
             # - Process total orbital projection data
             for o_ind, orbital in enumerate(orbitals):
-                d["dos"]["orbitals"][str(orbital)]["band_gap"][Spin.up] = tot_orb_dos[orbital].get_gap(spin=Spin.up)
+                d["dos"]["orbitals"][str(orbital)]["band_gap"][Spin.up] = tot_orb_dos[
+                    orbital
+                ].get_gap(spin=Spin.up)
                 (cbm, vbm) = tot_orb_dos[orbital].get_cbm_vbm(spin=Spin.up)
                 d["dos"]["orbitals"][str(orbital)]["cbm"][Spin.up] = cbm
                 d["dos"]["orbitals"][str(orbital)]["vbm"][Spin.up] = vbm
@@ -289,9 +335,9 @@ class BSDOSBuilder(Builder):
                         label = orbital
                         ind = ind2
 
-                    d["dos"]["elements"][str(ele)][str(orbital)]["band_gap"][Spin.up] = proj_dos[label].get_gap(
-                        spin=Spin.up
-                    )
+                    d["dos"]["elements"][str(ele)][str(orbital)]["band_gap"][
+                        Spin.up
+                    ] = proj_dos[label].get_gap(spin=Spin.up)
                     (cbm, vbm) = proj_dos[label].get_cbm_vbm(spin=Spin.up)
                     d["dos"]["elements"][str(ele)][str(orbital)]["cbm"][Spin.up] = cbm
                     d["dos"]["elements"][str(ele)][str(orbital)]["vbm"][Spin.up] = vbm
@@ -300,7 +346,13 @@ class BSDOSBuilder(Builder):
         # find bs type for each task in task_type and store each different bs object
 
         mats = self.materials.query(
-            properties=[self.materials.key, "structure", "inputs", "task_types", self.materials.last_updated_field,],
+            properties=[
+                self.materials.key,
+                "structure",
+                "inputs",
+                "task_types",
+                self.materials.last_updated_field,
+            ],
             criteria={self.materials.key: {"$in": mat_list}},
         )
 
@@ -324,11 +376,17 @@ class BSDOSBuilder(Builder):
                         bs_type = None
 
                         task_query = self.tasks.query_one(
-                            properties=["last_updated", "input.is_hubbard", "orig_inputs.kpoints",],
+                            properties=[
+                                "last_updated",
+                                "input.is_hubbard",
+                                "orig_inputs.kpoints",
+                            ],
                             criteria={"task_id": int(task_id)},
                         )
 
-                        bs = self.bandstructures.query_one(criteria={"metadata.task_id": int(task_id)})
+                        bs = self.bandstructures.query_one(
+                            criteria={"metadata.task_id": int(task_id)}
+                        )
 
                         structure = Structure.from_dict(bs["structure"])
 
@@ -349,17 +407,32 @@ class BSDOSBuilder(Builder):
                                     atol=1e-5,
                                 )
                                 hs_labels_full = hskp.kpath["kpoints"]
-                                hs_path_uniq = set([label for segment in hskp.kpath["path"] for label in segment])
+                                hs_path_uniq = set(
+                                    [
+                                        label
+                                        for segment in hskp.kpath["path"]
+                                        for label in segment
+                                    ]
+                                )
 
-                                hs_labels = {k: hs_labels_full[k] for k in hs_path_uniq if k in hs_path_uniq}
+                                hs_labels = {
+                                    k: hs_labels_full[k]
+                                    for k in hs_path_uniq
+                                    if k in hs_path_uniq
+                                }
 
                                 shared_items = {
                                     k: bs_labels[k]
                                     for k in bs_labels
-                                    if k in hs_labels and np.allclose(bs_labels[k], hs_labels[k], atol=1e-3)
+                                    if k in hs_labels
+                                    and np.allclose(
+                                        bs_labels[k], hs_labels[k], atol=1e-3
+                                    )
                                 }
 
-                                if len(shared_items) == len(bs_labels) and len(shared_items) == len(hs_labels):
+                                if len(shared_items) == len(bs_labels) and len(
+                                    shared_items
+                                ) == len(hs_labels):
                                     bs_type = ptype
 
                         is_hubbard = task_query["input"]["is_hubbard"]
@@ -382,7 +455,11 @@ class BSDOSBuilder(Builder):
                 # Handle uniform tasks
                 if "NSCF Uniform" in mat["task_types"][task_id]:
                     task_query = self.tasks.query_one(
-                        properties=["last_updated", "input.is_hubbard", "orig_inputs.kpoints",],
+                        properties=[
+                            "last_updated",
+                            "input.is_hubbard",
+                            "orig_inputs.kpoints",
+                        ],
                         criteria={"task_id": int(task_id)},
                     )
 
@@ -404,12 +481,20 @@ class BSDOSBuilder(Builder):
                 if seen_bs_data[bs_type]:
                     sorted_data = sorted(
                         seen_bs_data[bs_type],
-                        key=lambda entry: (entry["is_hubbard"], entry["nkpoints"], entry["updated_on"],),
+                        key=lambda entry: (
+                            entry["is_hubbard"],
+                            entry["nkpoints"],
+                            entry["updated_on"],
+                        ),
                         reverse=True,
                     )
 
-                    mat["bandstructure"][bs_type]["task_id"] = int(sorted_data[0]["task_id"])
-                    mat["bandstructure"][bs_type]["data"] = self.bandstructures.query_one(
+                    mat["bandstructure"][bs_type]["task_id"] = int(
+                        sorted_data[0]["task_id"]
+                    )
+                    mat["bandstructure"][bs_type][
+                        "data"
+                    ] = self.bandstructures.query_one(
                         criteria={"metadata.task_id": int(sorted_data[0]["task_id"])}
                     )
 
@@ -417,7 +502,11 @@ class BSDOSBuilder(Builder):
 
                 sorted_dos_data = sorted(
                     seen_dos_data,
-                    key=lambda entry: (entry["is_hubbard"], entry["nkpoints"], entry["updated_on"],),
+                    key=lambda entry: (
+                        entry["is_hubbard"],
+                        entry["nkpoints"],
+                        entry["updated_on"],
+                    ),
                     reverse=True,
                 )
 
@@ -431,13 +520,133 @@ class BSDOSBuilder(Builder):
         return mats_updated
 
 
+class DOSCopyBuilder(Builder):
+    def __init__(self, dos, s3, query=None, **kwargs):
+        """
+        Copies dos objects from mongodb to an aws or minio s3 bucket
+
+        dos (Store) : GridFS Store of dos data
+        s3  (Store) : s3 store
+        query (dict): dictionary to limit dos data to be analyzed
+        """
+
+        self.s3 = s3
+        self.dos = dos
+        self.query = query if query else {}
+        self.s3.write_to_s3_in_process_items = True
+
+        super().__init__(sources=[dos], targets=[s3], **kwargs)
+
+        self.chunk_size = 5
+
+    def get_items(self):
+        """
+        Gets all items to process
+
+        Returns:
+            list relevant  dos objects
+        """
+
+        self.logger.info("DOS Copy Builder Started")
+
+        q = dict(self.query)
+
+        # All task_ids
+
+        dos_oids = self.dos.distinct(field="_id", criteria=q)
+        s3_oids = [
+            ObjectId(entry) for entry in self.s3.distinct(field="gridfs_id", criteria=q)
+        ]
+
+        dos_set = set(dos_oids) - set(s3_oids)
+
+        dos_list = [key for key in dos_set]
+
+        self.logger.debug("Processing {} DOS objects for copying".format(len(dos_list)))
+
+        self.total = len(dos_list)
+
+        for entry in dos_list:
+            metadata = self.dos._files_store.query_one(
+                criteria={"_id": entry}, properties=["metadata", "uploadDate"],
+            )
+            data = {
+                "gridfs_id": str(metadata["_id"]),
+                "task_id": str(metadata["metadata"]["task_id"]),
+                self.s3.last_updated_field: metadata["uploadDate"],
+                "dos": self.dos.query_one(criteria={"_id": entry}),
+            }
+
+            yield data
+
+    def process_item(self, entry):
+
+        dos = CompleteDos.from_dict(entry["dos"])
+        spin_polarized = dos.spin_polarization
+        efermi = dos.efermi
+
+        min_energy = min([min(dos.energies)])
+        max_energy = max([max(dos.energies)])
+
+        num_uniq_elements = len(set([site.species_string for site in dos.structure]))
+
+        structure = Structure.from_dict(entry["dos"]["structure"])
+
+        d = {
+            "gridfs_id": entry["gridfs_id"],
+            "data": entry["dos"],
+            "task_id": entry["task_id"],
+            "spin_polarized": str(spin_polarized),
+            "efermi": str(efermi),
+            "min_energy": str(min_energy),
+            "max_energy": str(max_energy),
+            "num_uniq_elements": str(num_uniq_elements),
+            self.s3.last_updated_field: entry["last_updated"],
+        }
+
+        d_new = self.s3.write_doc_to_s3(
+            d,
+            search_keys=[
+                key
+                for key in d
+                if key
+                not in [
+                    "data",
+                    "spin_polarized",
+                    "efermi",
+                    "min_energy",
+                    "max_energy",
+                    "num_uniq_elements",
+                    self.s3.last_updated_field,
+                ]
+            ],
+            write_to_s3=True,
+        )
+
+        return d
+
+    def update_targets(self, items):
+        """
+        Copy each dos to the bucket
+
+        Args:
+            items ([([dict],[int])]): A list of tuples of materials to update and the corresponding processed task_ids
+        """
+        items = list(filter(None, items))
+
+        if len(items) > 0:
+            self.logger.info("Uploading {} dos entries".format(len(items)))
+            self.s3.update(items, key=[key for key in items[0] if key != "data"])
+        else:
+            self.logger.info("No dos entries to copy")
+
+
 class BSCopyBuilder(Builder):
     def __init__(self, bandstructures, s3, query=None, **kwargs):
         """
-        Copies band structure and dos objects from mongodb to an aws or minio s3 bucket
+        Copies band structure objects from mongodb to an aws or minio s3 bucket
 
-        materials (Store) : Store of materials documents
-        electronic_structure  (Store) : Store of electronic structure documents
+        s3 (Store): s3 store
         bandstructures (Store) : store of bandstructures
         query (dict): dictionary to limit bandstructures to be analyzed
         """
@@ -456,23 +665,27 @@ class BSCopyBuilder(Builder):
         Gets all items to process
 
         Returns:
-            list relevant bandstructure and dos objects
+            list relevant band structures
         """
 
-        self.logger.info("Electronic Structure Copy Builder Started")
+        self.logger.info("Band Structure Copy Builder Started")
 
         q = dict(self.query)
 
         # All task_ids
 
         bs_oids = self.bandstructures.distinct(field="_id", criteria=q)
-        s3_oids = [ObjectId(entry) for entry in self.s3.distinct(field="gridfs_id", criteria=q)]
+        s3_oids = [
+            ObjectId(entry) for entry in self.s3.distinct(field="gridfs_id", criteria=q)
+        ]
 
         bs_set = set(bs_oids) - set(s3_oids)
 
         bs_list = [key for key in bs_set]
 
-        self.logger.debug("Processing {} bandstructure objects for copying".format(len(bs_list)))
+        self.logger.debug(
+            "Processing {} band structure objects for copying".format(len(bs_list))
+        )
 
         self.total = len(bs_list)
 
@@ -522,17 +735,24 @@ class BSCopyBuilder(Builder):
                     atol=1e-5,
                 )
                 hs_labels_full = hskp.kpath["kpoints"]
-                hs_path_uniq = set([label for segment in hskp.kpath["path"] for label in segment])
+                hs_path_uniq = set(
+                    [label for segment in hskp.kpath["path"] for label in segment]
+                )
 
-                hs_labels = {k: hs_labels_full[k] for k in hs_path_uniq if k in hs_path_uniq}
+                hs_labels = {
+                    k: hs_labels_full[k] for k in hs_path_uniq if k in hs_path_uniq
+                }
 
                 shared_items = {
                     k: bs_labels[k]
                     for k in bs_labels
-                    if k in hs_labels and np.allclose(bs_labels[k], hs_labels[k], atol=1e-3)
+                    if k in hs_labels
+                    and np.allclose(bs_labels[k], hs_labels[k], atol=1e-3)
                 }
 
-                if len(shared_items) == len(bs_labels) and len(shared_items) == len(hs_labels):
+                if len(shared_items) == len(bs_labels) and len(shared_items) == len(
+                    hs_labels
+                ):
                     bs_type = ptype
 
         d = {
@@ -550,7 +770,25 @@ class BSCopyBuilder(Builder):
             self.s3.last_updated_field: entry["last_updated"],
         }
 
-        d_new = self.s3.write_doc_to_s3(d, search_keys=[key for key in d if key not in ["data", "spin_polarized", "num_bands", "efermi", "min_energy", "max_energy", "num_uniq_elements", self.s3.last_updated_field]], write_to_s3=True)
+        d_new = self.s3.write_doc_to_s3(
+            d,
+            search_keys=[
+                key
+                for key in d
+                if key
+                not in [
+                    "data",
+                    "spin_polarized",
+                    "num_bands",
+                    "efermi",
+                    "min_energy",
+                    "max_energy",
+                    "num_uniq_elements",
+                    self.s3.last_updated_field,
+                ]
+            ],
+            write_to_s3=True,
+        )
 
         return d
 
@@ -571,7 +809,9 @@ class BSCopyBuilder(Builder):
 
 
 class BSFileCopyBuilder(Builder):
-    def __init__(self, tasks, bandstructures, s3, meta_dir, target_dir, query=None, **kwargs):
+    def __init__(
+        self, tasks, bandstructures, s3, meta_dir, target_dir, query=None, **kwargs
+    ):
         """
         Copies band structure and dos objects from mongodb to a minio bucket via direct direct file copy
         
@@ -589,7 +829,9 @@ class BSFileCopyBuilder(Builder):
         self.query = query if query else {}
         self.s3.write_to_s3_in_process_items = True
 
-        super().__init__(sources=[self.tasks, self.bandstructures], targets=[self.s3], **kwargs)
+        super().__init__(
+            sources=[self.tasks, self.bandstructures], targets=[self.s3], **kwargs
+        )
 
         self.chunk_size = 5
 
@@ -606,16 +848,23 @@ class BSFileCopyBuilder(Builder):
         q = dict(self.query)
 
         # All task_ids
-        
-        task_oids = self.tasks.distinct(field="calcs_reversed.0.bandstructure_fs_id", criteria={"task_label": "nscf uniform"}) # only line-modes for now
+
+        task_oids = self.tasks.distinct(
+            field="calcs_reversed.0.bandstructure_fs_id",
+            criteria={"task_label": "nscf uniform"},
+        )  # only line-modes for now
         bs_oids = self.bandstructures.distinct(field="_id", criteria=q)
-        s3_oids = [ObjectId(entry) for entry in self.s3.distinct(field="gridfs_id", criteria=q)]
+        s3_oids = [
+            ObjectId(entry) for entry in self.s3.distinct(field="gridfs_id", criteria=q)
+        ]
 
         bs_set = set(bs_oids) - set(task_oids) - set(s3_oids)
 
         bs_list = [key for key in bs_set]
 
-        self.logger.debug("Processing {} bandstructure objects for copying".format(len(bs_list)))
+        self.logger.debug(
+            "Processing {} bandstructure objects for copying".format(len(bs_list))
+        )
 
         self.total = len(bs_list)
 
@@ -640,7 +889,7 @@ class BSFileCopyBuilder(Builder):
         efermi = bs.efermi
 
         keys = bs.bands.keys()
-        
+
         min_energy = min([min(np.ndarray.flatten(bs.bands[key])) for key in keys])
         max_energy = max([max(np.ndarray.flatten(bs.bands[key])) for key in keys])
 
@@ -666,17 +915,24 @@ class BSFileCopyBuilder(Builder):
                     atol=1e-5,
                 )
                 hs_labels_full = hskp.kpath["kpoints"]
-                hs_path_uniq = set([label for segment in hskp.kpath["path"] for label in segment])
+                hs_path_uniq = set(
+                    [label for segment in hskp.kpath["path"] for label in segment]
+                )
 
-                hs_labels = {k: hs_labels_full[k] for k in hs_path_uniq if k in hs_path_uniq}
+                hs_labels = {
+                    k: hs_labels_full[k] for k in hs_path_uniq if k in hs_path_uniq
+                }
 
                 shared_items = {
                     k: bs_labels[k]
                     for k in bs_labels
-                    if k in hs_labels and np.allclose(bs_labels[k], hs_labels[k], atol=1e-3)
+                    if k in hs_labels
+                    and np.allclose(bs_labels[k], hs_labels[k], atol=1e-3)
                 }
 
-                if len(shared_items) == len(bs_labels) and len(shared_items) == len(hs_labels):
+                if len(shared_items) == len(bs_labels) and len(shared_items) == len(
+                    hs_labels
+                ):
                     bs_type = ptype
 
         search_doc = {
@@ -708,28 +964,30 @@ class BSFileCopyBuilder(Builder):
                 data = zlib.compress(data)
 
             meta_json = {
-                    "version": "1.0.2",
-                    "checksum": {
-                        "algorithm": "",
-                        "blocksize": 0,
-                        "hashes": None
-                        },
-                    "meta": {
-                        "content-type": "application/octet-stream",
-                        "etag": calc_etag(data)
-                        }
-                    }
+                "version": "1.0.2",
+                "checksum": {"algorithm": "", "blocksize": 0, "hashes": None},
+                "meta": {
+                    "content-type": "application/octet-stream",
+                    "etag": calc_etag(data),
+                },
+            }
 
-            if not os.path.exists(f"{self.meta_dir}/{self.s3.sub_dir}/{search_doc['gridfs_id']}"):
-                os.makedirs(f"{self.meta_dir}/{self.s3.sub_dir}/{search_doc['gridfs_id']}")
-            with open(f"{self.meta_dir}/{self.s3.sub_dir}/{search_doc['gridfs_id']}/fs.json", 'w') as outfile:
+            if not os.path.exists(
+                f"{self.meta_dir}/{self.s3.sub_dir}/{search_doc['gridfs_id']}"
+            ):
+                os.makedirs(
+                    f"{self.meta_dir}/{self.s3.sub_dir}/{search_doc['gridfs_id']}"
+                )
+            with open(
+                f"{self.meta_dir}/{self.s3.sub_dir}/{search_doc['gridfs_id']}/fs.json",
+                "w",
+            ) as outfile:
                 json.dump(meta_json, outfile)
-            
+
             if not os.path.exists(f"{self.target_dir}/{self.s3.sub_dir}"):
                 os.makedirs(f"{self.target_dir}/{self.s3.sub_dir}")
             with open(
-                f"{self.target_dir}/{self.s3.sub_dir}/{search_doc['gridfs_id']}",
-                "wb",
+                f"{self.target_dir}/{self.s3.sub_dir}/{search_doc['gridfs_id']}", "wb",
             ) as outfile:
                 outfile.write(data)
                 data = None
@@ -751,9 +1009,10 @@ class BSFileCopyBuilder(Builder):
         else:
             self.logger.info("No band structure to copy")
 
+
 def calc_etag(input_data):
     m = md5()
     chunk_size = 1024 * 1024
     for i in range(0, len(input_data), chunk_size):
-        m.update(input_data[i:i+chunk_size])
+        m.update(input_data[i : i + chunk_size])
     return m.hexdigest()
