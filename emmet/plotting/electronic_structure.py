@@ -381,11 +381,11 @@ class BSDOSBuilder(Builder):
                                 "input.is_hubbard",
                                 "orig_inputs.kpoints",
                             ],
-                            criteria={"task_id": int(task_id)},
+                            criteria={"task_id": str(task_id)},
                         )
 
                         bs = self.bandstructures.query_one(
-                            criteria={"metadata.task_id": int(task_id)}
+                            criteria={"metadata.task_id": str(task_id)}
                         )
 
                         structure = Structure.from_dict(bs["structure"])
@@ -460,11 +460,21 @@ class BSDOSBuilder(Builder):
                             "input.is_hubbard",
                             "orig_inputs.kpoints",
                         ],
-                        criteria={"task_id": int(task_id)},
+                        criteria={"task_id": str(task_id)},
                     )
 
                     is_hubbard = task_query["input"]["is_hubbard"]
-                    nkpoints = task_query["orig_inputs"]["kpoints"]["nkpoints"]
+
+                    if (
+                        task_query["orig_inputs"]["kpoints"]["generation_style"]
+                        == "Monkhorst"
+                    ):
+                        nkpoints = np.prod(
+                            task_query["orig_inputs"]["kpoints"]["kpoints"][0], axis=0
+                        )
+                    else:
+                        nkpoints = task_query["orig_inputs"]["kpoints"]["nkpoints"]
+
                     lu_dt = task_query["last_updated"]
 
                     seen_dos_data.append(
@@ -489,13 +499,13 @@ class BSDOSBuilder(Builder):
                         reverse=True,
                     )
 
-                    mat["bandstructure"][bs_type]["task_id"] = int(
+                    mat["bandstructure"][bs_type]["task_id"] = str(
                         sorted_data[0]["task_id"]
                     )
                     mat["bandstructure"][bs_type][
                         "data"
                     ] = self.bandstructures.query_one(
-                        criteria={"metadata.task_id": int(sorted_data[0]["task_id"])}
+                        criteria={"metadata.task_id": str(sorted_data[0]["task_id"])}
                     )
 
             if seen_dos_data:
@@ -510,9 +520,9 @@ class BSDOSBuilder(Builder):
                     reverse=True,
                 )
 
-                mat["dos"]["task_id"] = int(sorted_dos_data[0]["task_id"])
+                mat["dos"]["task_id"] = str(sorted_dos_data[0]["task_id"])
                 mat["dos"]["data"] = self.dos.query_one(
-                    criteria={"metadata.task_id": int(sorted_dos_data[0]["task_id"])}
+                    criteria={"metadata.task_id": str(sorted_dos_data[0]["task_id"])}
                 )
 
             mats_updated.append(mat)
@@ -620,7 +630,6 @@ class DOSCopyBuilder(Builder):
                     self.s3.last_updated_field,
                 ]
             ],
-            write_to_s3=True,
         )
 
         return d
@@ -787,7 +796,6 @@ class BSCopyBuilder(Builder):
                     self.s3.last_updated_field,
                 ]
             ],
-            write_to_s3=True,
         )
 
         return d
