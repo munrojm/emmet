@@ -592,7 +592,6 @@ class DOSCopyBuilder(Builder):
     def process_item(self, entry):
 
         dos = CompleteDos.from_dict(entry["dos"])
-        spin_polarized = dos.spin_polarization
         efermi = dos.efermi
 
         min_energy = min([min(dos.energies)])
@@ -606,7 +605,6 @@ class DOSCopyBuilder(Builder):
             "gridfs_id": entry["gridfs_id"],
             "data": entry["dos"],
             "task_id": entry["task_id"],
-            "spin_polarized": str(spin_polarized),
             "efermi": str(efermi),
             "min_energy": str(min_energy),
             "max_energy": str(max_energy),
@@ -622,7 +620,6 @@ class DOSCopyBuilder(Builder):
                 if key
                 not in [
                     "data",
-                    "spin_polarized",
                     "efermi",
                     "min_energy",
                     "max_energy",
