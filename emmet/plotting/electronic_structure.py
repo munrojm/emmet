@@ -27,36 +27,39 @@ class BSDOSBuilder(Builder):
         self,
         tasks,
         materials,
-        electronic_structure,
-        bandstructures,
+        bandstructure,
         dos,
+        bandstructure_fs,
+        dos_fs,
         query=None,
         **kwargs,
     ):
         """
-        Creates an electronic structure from a tasks collection, the associated band structures and density of states, and the materials structure
+        Creates a bandstructure and dos collection from a tasks collection, 
+        the associated band structures and density of states gridfs collections, 
+        and the materials collection.
 
         Individual bandstructures for each of the three conventions are generated.
 
-        Really only usefull for MP Website infrastructure right now.
-
         materials (Store) : Store of materials documents
-        electronic_structure  (Store) : Store of electronic structure documents
-        bandstructures (Store) : store of bandstructures
-        dos (Store) : store of DOS
+        bandstructure (Store) : Store of bandstructure summary data documents
+        dos (Store) : Store of dos summary data documents
+        bandstructure_fs (Store) : store of bandstructures
+        dos_fs (Store) : store of DOS
         query (dict): dictionary to limit tasks to be analyzed
         """
 
         self.tasks = tasks
         self.materials = materials
-        self.electronic_structure = electronic_structure
-        self.bandstructures = bandstructures
+        self.bandstructure = bandstructure
         self.dos = dos
+        self.bandstructure_fs = bandstructure_fs
+        self.dos_fs = dos_fs
         self.query = query if query else {}
 
         super().__init__(
-            sources=[tasks, materials, bandstructures, dos],
-            targets=[electronic_structure],
+            sources=[tasks, materials, bandstructure_fs, dos_fs],
+            targets=[bandstructure, dos],
             **kwargs,
         )
 
@@ -80,7 +83,7 @@ class BSDOSBuilder(Builder):
             {"bandstructure.dos_task": {"$exists": 1}},
         ]
         mat_ids = list(self.materials.distinct(self.materials.key, criteria=q))
-        es_ids = self.electronic_structure.distinct("task_id")
+        es_ids = self.bandstructure.distinct("task_id")
 
         # get all materials that were updated since the electronic structure was last updated
         # and there is either a dos or bandstructure
@@ -92,7 +95,7 @@ class BSDOSBuilder(Builder):
         ]
 
         mats_set = set(
-            self.electronic_structure.newer_in(
+            self.bandstructure.newer_in(
                 target=self.materials, criteria=q, exhaustive=True
             )
         ) | (set(mat_ids) - set(es_ids))
@@ -144,10 +147,9 @@ class BSDOSBuilder(Builder):
                 },
             }
 
-            bs_data = {"total": {"band_gap": {}, "cbm": {}, "vbm": {}}}
+            bs_data = {"band_gap": {}, "cbm": {}, "vbm": {}, "nbands": {}}
 
             d = {
-                self.electronic_structure.key: mat[self.materials.key],
                 "bandstructure": {
                     "sc": copy.deepcopy(bs_data),
                     "lm": copy.deepcopy(bs_data),
@@ -180,9 +182,10 @@ class BSDOSBuilder(Builder):
                 d["bandstructure"][bs_type]["task_id"] = mat["bandstructure"][bs_type][
                     "task_id"
                 ]
-                d["bandstructure"][bs_type]["total"]["band_gap"] = bs.get_band_gap()
-                d["bandstructure"][bs_type]["total"]["cbm"] = bs.get_cbm()
-                d["bandstructure"][bs_type]["total"]["vbm"] = bs.get_vbm()
+                d["bandstructure"][bs_type]["band_gap"] = bs.get_band_gap()
+                d["bandstructure"][bs_type]["cbm"] = bs.get_cbm()
+                d["bandstructure"][bs_type]["vbm"] = bs.get_vbm()
+                d["bandstructure"][bs_type]["nbands"] = bs.nb_bands
 
                 self._process_bs(
                     d=d, bs=bs, bs_type=bs_type, skip="lm" not in type_available
@@ -190,17 +193,26 @@ class BSDOSBuilder(Builder):
 
                 # -- Get total and projected dos data and traces
                 if index == 0:
-                    d["dos"]["task_id"] = mat["dos"]["task_id"]
+                    d["dos"]["total"]["task_id"] = mat["dos"]["task_id"]
                     self._process_dos(d=d, dos=dos, spin_polarized=is_sp)
 
-            d = {
-                self.electronic_structure.last_updated_field: mat[
+            bs_data = {
+                self.bandstructure.key: mat[self.materials.key],
+                self.bandstructure.last_updated_field: mat[
                     self.materials.last_updated_field
                 ],
                 **structure_metadata,
-                **d,
+                **d["bandstructure"],
             }
-            d_list.append(d)
+
+            dos_data = {
+                self.dos.key: mat[self.materials.key],
+                self.dos.last_updated_field: mat[self.materials.last_updated_field],
+                **structure_metadata,
+                **d["dos"],
+            }
+
+            d_list.append((bs_data, dos_data))
 
         return d_list
 
@@ -209,13 +221,16 @@ class BSDOSBuilder(Builder):
         Inserts the new task_types into the task_types collection
 
         Args:
-            items ([([dict],[int])]): A list of tuples of materials to update and the corresponding processed task_ids
+            items ([([dict],[int])]): A list of tuples of docs to update
         """
         items = list(filter(None, items))[0]
 
         if len(items) > 0:
             self.logger.info("Updating {} electronic structure docs".format(len(items)))
-            self.electronic_structure.update(items)
+
+            for item in items:
+                self.bandstructure.update(item[0])
+                self.dos.update(item[1])
         else:
             self.logger.info("No electronic structure docs to update")
 
@@ -248,9 +263,9 @@ class BSDOSBuilder(Builder):
                     )
                     eq_labels = hskp.equiv_labels
 
-            d["bandstructure"][bs_type]["total"]["equiv_labels"] = eq_labels[bs_type]
+            d["bandstructure"][bs_type]["equiv_labels"] = eq_labels[bs_type]
         else:
-            d["bandstructure"][bs_type]["total"]["equiv_labels"] = {}
+            d["bandstructure"][bs_type]["equiv_labels"] = {}
 
     @staticmethod
     def _process_dos(d, dos, spin_polarized):
@@ -384,7 +399,7 @@ class BSDOSBuilder(Builder):
                             criteria={"task_id": str(task_id)},
                         )
 
-                        bs = self.bandstructures.query_one(
+                        bs = self.bandstructure_fs.query_one(
                             criteria={"metadata.task_id": str(task_id)}
                         )
 
@@ -504,7 +519,7 @@ class BSDOSBuilder(Builder):
                     )
                     mat["bandstructure"][bs_type][
                         "data"
-                    ] = self.bandstructures.query_one(
+                    ] = self.bandstructure_fs.query_one(
                         criteria={"metadata.task_id": str(sorted_data[0]["task_id"])}
                     )
 
@@ -521,7 +536,7 @@ class BSDOSBuilder(Builder):
                 )
 
                 mat["dos"]["task_id"] = str(sorted_dos_data[0]["task_id"])
-                mat["dos"]["data"] = self.dos.query_one(
+                mat["dos"]["data"] = self.dos_fs.query_one(
                     criteria={"metadata.task_id": str(sorted_dos_data[0]["task_id"])}
                 )
 
