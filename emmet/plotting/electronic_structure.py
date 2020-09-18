@@ -139,8 +139,8 @@ class BSDOSBuilder(Builder):
 
             dos_data = {
                 "total": {"band_gap": {}, "cbm": {}, "vbm": {}},
-                "elements": {},
-                "orbitals": {
+                "elemental": {},
+                "orbital": {
                     "s": {"band_gap": {}, "cbm": {}, "vbm": {}},
                     "p": {"band_gap": {}, "cbm": {}, "vbm": {}},
                     "d": {"band_gap": {}, "cbm": {}, "vbm": {}},
@@ -275,9 +275,9 @@ class BSDOSBuilder(Builder):
         tot_orb_dos = dos.get_spd_dos()
 
         for ele in ele_dos.keys():
-            d["dos"]["elements"][str(ele)] = {}
+            d["dos"]["elemental"][str(ele)] = {}
             for sub_label in ["total", "s", "p", "d", "f"]:
-                d["dos"]["elements"][str(ele)][sub_label] = {
+                d["dos"]["elemental"][str(ele)][sub_label] = {
                     "band_gap": {},
                     "cbm": {},
                     "vbm": {},
@@ -293,12 +293,12 @@ class BSDOSBuilder(Builder):
 
                 # - Process total orbital projection data
                 for o_ind, orbital in enumerate(orbitals):
-                    d["dos"]["orbitals"][str(orbital)]["band_gap"][spin] = tot_orb_dos[
+                    d["dos"]["orbital"][str(orbital)]["band_gap"][spin] = tot_orb_dos[
                         orbital
                     ].get_gap(spin=spin)
                     (cbm, vbm) = tot_orb_dos[orbital].get_cbm_vbm(spin=spin)
-                    d["dos"]["orbitals"][str(orbital)]["cbm"][spin] = cbm
-                    d["dos"]["orbitals"][str(orbital)]["vbm"][spin] = vbm
+                    d["dos"]["orbital"][str(orbital)]["cbm"][spin] = cbm
+                    d["dos"]["orbital"][str(orbital)]["vbm"][spin] = vbm
 
             # - Process element and element orbital projection data
             for ind1, ele in enumerate(ele_dos):
@@ -313,12 +313,12 @@ class BSDOSBuilder(Builder):
                         label = orbital
 
                     for spin in [Spin.down, Spin.up]:
-                        d["dos"]["elements"][str(ele)][str(orbital)]["band_gap"][
+                        d["dos"]["elemental"][str(ele)][str(orbital)]["band_gap"][
                             spin
                         ] = proj_dos[label].get_gap(spin=spin)
                         (cbm, vbm) = proj_dos[label].get_cbm_vbm(spin=spin)
-                        d["dos"]["elements"][str(ele)][str(orbital)]["cbm"][spin] = cbm
-                        d["dos"]["elements"][str(ele)][str(orbital)]["vbm"][spin] = vbm
+                        d["dos"]["elemental"][str(ele)][str(orbital)]["cbm"][spin] = cbm
+                        d["dos"]["elemental"][str(ele)][str(orbital)]["vbm"][spin] = vbm
 
         else:
             # - Process total DOS data
@@ -329,12 +329,12 @@ class BSDOSBuilder(Builder):
 
             # - Process total orbital projection data
             for o_ind, orbital in enumerate(orbitals):
-                d["dos"]["orbitals"][str(orbital)]["band_gap"][Spin.up] = tot_orb_dos[
+                d["dos"]["orbital"][str(orbital)]["band_gap"][Spin.up] = tot_orb_dos[
                     orbital
                 ].get_gap(spin=Spin.up)
                 (cbm, vbm) = tot_orb_dos[orbital].get_cbm_vbm(spin=Spin.up)
-                d["dos"]["orbitals"][str(orbital)]["cbm"][Spin.up] = cbm
-                d["dos"]["orbitals"][str(orbital)]["vbm"][Spin.up] = vbm
+                d["dos"]["orbital"][str(orbital)]["cbm"][Spin.up] = cbm
+                d["dos"]["orbital"][str(orbital)]["vbm"][Spin.up] = vbm
 
             # - Process element and element orbital projection data
             for ind1, ele in enumerate(ele_dos):
@@ -350,12 +350,12 @@ class BSDOSBuilder(Builder):
                         label = orbital
                         ind = ind2
 
-                    d["dos"]["elements"][str(ele)][str(orbital)]["band_gap"][
+                    d["dos"]["elemental"][str(ele)][str(orbital)]["band_gap"][
                         Spin.up
                     ] = proj_dos[label].get_gap(spin=Spin.up)
                     (cbm, vbm) = proj_dos[label].get_cbm_vbm(spin=Spin.up)
-                    d["dos"]["elements"][str(ele)][str(orbital)]["cbm"][Spin.up] = cbm
-                    d["dos"]["elements"][str(ele)][str(orbital)]["vbm"][Spin.up] = vbm
+                    d["dos"]["elemental"][str(ele)][str(orbital)]["cbm"][Spin.up] = cbm
+                    d["dos"]["elemental"][str(ele)][str(orbital)]["vbm"][Spin.up] = vbm
 
     def _update_mat(self, mat_list):
         # find bs type for each task in task_type and store each different bs object
