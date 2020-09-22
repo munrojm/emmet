@@ -518,7 +518,7 @@ class BSDOSBuilder(Builder):
                         sorted_data[0]["task_id"]
                     )
                     mat["bandstructure"][bs_type][
-                        "data"
+                        "object"
                     ] = self.bandstructure_fs.query_one(
                         criteria={"metadata.task_id": str(sorted_data[0]["task_id"])}
                     )
@@ -536,7 +536,7 @@ class BSDOSBuilder(Builder):
                 )
 
                 mat["dos"]["task_id"] = str(sorted_dos_data[0]["task_id"])
-                mat["dos"]["data"] = self.dos_fs.query_one(
+                mat["dos"]["object"] = self.dos_fs.query_one(
                     criteria={"metadata.task_id": str(sorted_dos_data[0]["task_id"])}
                 )
 
@@ -618,7 +618,7 @@ class DOSCopyBuilder(Builder):
 
         d = {
             "gridfs_id": entry["gridfs_id"],
-            "data": entry["dos"],
+            "object": entry["dos"],
             "task_id": entry["task_id"],
             "efermi": str(efermi),
             "min_energy": str(min_energy),
@@ -634,7 +634,7 @@ class DOSCopyBuilder(Builder):
                 for key in d
                 if key
                 not in [
-                    "data",
+                    "object",
                     "efermi",
                     "min_energy",
                     "max_energy",
@@ -778,7 +778,7 @@ class BSCopyBuilder(Builder):
 
         d = {
             "gridfs_id": entry["gridfs_id"],
-            "data": entry["bs"],
+            "object": entry["bs"],
             "mode": "line",
             "task_id": entry["task_id"],
             "spin_polarized": str(spin_polarized),
@@ -798,7 +798,7 @@ class BSCopyBuilder(Builder):
                 for key in d
                 if key
                 not in [
-                    "data",
+                    "object",
                     "spin_polarized",
                     "num_bands",
                     "efermi",
