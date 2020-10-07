@@ -1,19 +1,20 @@
-import io
 import os
-import traceback
 import json
-from datetime import datetime
 from bson.objectid import ObjectId
 import msgpack
 import zlib
 from monty.msgpack import default as monty_default
 from hashlib import md5
 from maggma.builders import Builder
+from pydash.objects import get
 from pymatgen import Structure
 from pymatgen.symmetry.analyzer import SpacegroupAnalyzer
 from pymatgen.symmetry.bandstructure import HighSymmKpath
 from pymatgen.electronic_structure.dos import CompleteDos
-from pymatgen.electronic_structure.bandstructure import BandStructureSymmLine
+from pymatgen.electronic_structure.bandstructure import (
+    BandStructure,
+    BandStructureSymmLine,
+)
 from pymatgen.electronic_structure.core import Spin, OrbitalType
 from emmet.vasp.materials import structure_metadata as sm
 import copy
@@ -463,7 +464,7 @@ class BSDOSBuilder(Builder):
                                     "updated_on": lu_dt,
                                 }
                             )
-                except:
+                except Exception:
                     problem_tasks.append(task_id)
                     pass
 
@@ -620,29 +621,12 @@ class DOSCopyBuilder(Builder):
             "gridfs_id": entry["gridfs_id"],
             "object": entry["dos"],
             "task_id": entry["task_id"],
-            "efermi": str(efermi),
-            "min_energy": str(min_energy),
-            "max_energy": str(max_energy),
-            "num_uniq_elements": str(num_uniq_elements),
+            "efermi": efermi,
+            "min_energy": min_energy,
+            "max_energy": max_energy,
+            "num_uniq_elements": num_uniq_elements,
             self.s3.last_updated_field: entry["last_updated"],
         }
-
-        d_new = self.s3.write_doc_to_s3(
-            d,
-            search_keys=[
-                key
-                for key in d
-                if key
-                not in [
-                    "object",
-                    "efermi",
-                    "min_energy",
-                    "max_energy",
-                    "num_uniq_elements",
-                    self.s3.last_updated_field,
-                ]
-            ],
-        )
 
         return d
 
@@ -656,28 +640,38 @@ class DOSCopyBuilder(Builder):
         items = list(filter(None, items))
 
         if len(items) > 0:
-            self.logger.info("Uploading {} dos entries".format(len(items)))
-            self.s3.update(items, key=[key for key in items[0] if key != "data"])
+            self.logger.info("Uploading {} band structures".format(len(items)))
+            for item in items:
+                self.s3.update(
+                    [item], key=[key for key in item if key != "object"],
+                )
         else:
             self.logger.info("No dos entries to copy")
 
 
 class BSCopyBuilder(Builder):
-    def __init__(self, bandstructures, s3, query=None, **kwargs):
+    def __init__(
+        self, bandstructures, tasks, s3, task_types=None, query=None, **kwargs
+    ):
         """
         Copies band structure objects from mongodb to an aws or minio s3 bucket
 
         s3 (Store): s3 store
         bandstructures (Store) : store of bandstructures
+        tasks (Store): store of tasks
+        task_type (Store): Optional store of task type descriptions
         query (dict): dictionary to limit bandstructures to be analyzed
         """
 
         self.s3 = s3
         self.bandstructures = bandstructures
+        self.tasks = tasks
+        self.task_types = task_types
         self.query = query if query else {}
-        self.s3.write_to_s3_in_process_items = True
 
-        super().__init__(sources=[bandstructures], targets=[s3], **kwargs)
+        super().__init__(
+            sources=[bandstructures, tasks, task_types], targets=[s3], **kwargs
+        )
 
         self.chunk_size = 5
 
@@ -714,101 +708,162 @@ class BSCopyBuilder(Builder):
             metadata = self.bandstructures._files_store.query_one(
                 criteria={"_id": entry}, properties=["metadata", "uploadDate"],
             )
-            data = {
-                "gridfs_id": str(metadata["_id"]),
-                "task_id": str(metadata["metadata"]["task_id"]),
-                self.s3.last_updated_field: metadata["uploadDate"],
-                "bs": self.bandstructures.query_one(criteria={"_id": entry}),
-            }
 
-            yield data
+            task_data = self.tasks.query_one(
+                {"task_id": metadata["metadata"]["task_id"]},
+                ["task_type", "orig_inputs"],
+            )
+
+            # This handles old task documents without a task type description
+            if task_data.get("task_type", None) is None:
+                if self.task_types is None:
+                    raise RuntimeError(
+                        "Some task documents are missing task descriptions.\
+                        Please address this or include a task_type store."
+                    )
+                temp_type = self.task_types.query_one(
+                    {"task_id": metadata["metadata"]["task_id"]}, ["task_type"]
+                ).get("task_type", None)
+
+                task_data["task_type"] = temp_type
+
+            bs = self.bandstructures.query_one(criteria={"_id": entry})
+
+            if not bs.get("structure", None):
+                bs["structure"] = task_data["orig_inputs"]["poscar"]["structure"]
+
+            if task_data["task_type"] is not None:
+
+                if "line" in task_data["task_type"].lower():
+                    mode = "line"
+                    if bs["labels_dict"] == {}:
+                        labels = get(task_data, "orig_inputs.kpoints.labels", None)
+                        kpts = get(task_data, "orig_inputs.kpoints.kpoints", None)
+                        if labels and kpts:
+                            labels_dict = dict(zip(labels, kpts))
+                            labels_dict.pop(None, None)
+                        else:
+                            struc = Structure.from_dict(entry["bs"]["structure"])
+                            labels_dict = HighSymmKpath(struc)._kpath["kpoints"]
+
+                        bs["labels_dict"] = labels_dict
+                else:
+                    mode = "uniform"
+
+                data = {
+                    "gridfs_id": str(metadata["_id"]),
+                    "task_id": str(metadata["metadata"]["task_id"]),
+                    self.s3.last_updated_field: metadata["uploadDate"],
+                    "bs": bs,
+                    "mode": mode,
+                }
+
+                yield data
+
+            else:
+                pass
 
     def process_item(self, entry):
 
+        mode = entry["mode"]
+
         bs = BandStructureSymmLine.from_dict(entry["bs"])
+
         spin_polarized = bs.is_spin_polarized
         num_bands = bs.nb_bands
         efermi = bs.efermi
 
-        keys = bs.bands.keys()
-        min_energy = min([min(np.ndarray.flatten(bs.bands[key])) for key in keys])
-        max_energy = max([max(np.ndarray.flatten(bs.bands[key])) for key in keys])
-
-        num_uniq_elements = len(set([site.species_string for site in bs.structure]))
+        keys = list(bs.bands.keys())
+        try:
+            min_energy = min(
+                [
+                    min(np.array(bs.bands[keys[0]].item()["data"]).flatten())
+                    for key in keys
+                ]
+            )
+            max_energy = max(
+                [
+                    max(np.array(bs.bands[keys[0]].item()["data"]).flatten())
+                    for key in keys
+                ]
+            )
+        except Exception:
+            min_energy = min([min(np.ndarray.flatten(bs.bands[key])) for key in keys])
+            max_energy = max([max(np.ndarray.flatten(bs.bands[key])) for key in keys])
 
         structure = Structure.from_dict(entry["bs"]["structure"])
 
-        bs_labels = entry["bs"]["labels_dict"]
+        num_uniq_elements = len(set([site.species_string for site in structure]))
 
-        bs_type = "unknown"
+        if mode == "line":
 
-        if any([label.islower() for label in bs_labels]):
-            bs_type = "lm"
+            bs_labels = entry["bs"]["labels_dict"]
+
+            bs_type = "unknown"
+
+            if any([label.islower() for label in bs_labels]):
+                bs_type = "lm"
+            else:
+                for ptype in ["sc", "hin"]:
+                    hskp = HighSymmKpath(
+                        structure,
+                        has_magmoms=False,
+                        magmom_axis=None,
+                        path_type=ptype,
+                        symprec=0.1,
+                        angle_tolerance=5,
+                        atol=1e-5,
+                    )
+                    hs_labels_full = hskp.kpath["kpoints"]
+                    hs_path_uniq = set(
+                        [label for segment in hskp.kpath["path"] for label in segment]
+                    )
+
+                    hs_labels = {
+                        k: hs_labels_full[k] for k in hs_path_uniq if k in hs_path_uniq
+                    }
+
+                    shared_items = {
+                        k: bs_labels[k]
+                        for k in bs_labels
+                        if k in hs_labels
+                        and np.allclose(bs_labels[k], hs_labels[k], atol=1e-3)
+                    }
+
+                    if len(shared_items) == len(bs_labels) and len(shared_items) == len(
+                        hs_labels
+                    ):
+                        bs_type = ptype
+
+            d = {
+                "gridfs_id": entry["gridfs_id"],
+                "object": entry["bs"],
+                "mode": mode,
+                "task_id": entry["task_id"],
+                "spin_polarized": spin_polarized,
+                "num_bands": num_bands,
+                "path_type": bs_type,
+                "efermi": efermi,
+                "min_energy": min_energy,
+                "max_energy": max_energy,
+                "num_uniq_elements": num_uniq_elements,
+                self.s3.last_updated_field: entry["last_updated"],
+            }
+
         else:
-            for ptype in ["sc", "hin"]:
-                hskp = HighSymmKpath(
-                    structure,
-                    has_magmoms=False,
-                    magmom_axis=None,
-                    path_type=ptype,
-                    symprec=0.1,
-                    angle_tolerance=5,
-                    atol=1e-5,
-                )
-                hs_labels_full = hskp.kpath["kpoints"]
-                hs_path_uniq = set(
-                    [label for segment in hskp.kpath["path"] for label in segment]
-                )
-
-                hs_labels = {
-                    k: hs_labels_full[k] for k in hs_path_uniq if k in hs_path_uniq
-                }
-
-                shared_items = {
-                    k: bs_labels[k]
-                    for k in bs_labels
-                    if k in hs_labels
-                    and np.allclose(bs_labels[k], hs_labels[k], atol=1e-3)
-                }
-
-                if len(shared_items) == len(bs_labels) and len(shared_items) == len(
-                    hs_labels
-                ):
-                    bs_type = ptype
-
-        d = {
-            "gridfs_id": entry["gridfs_id"],
-            "object": entry["bs"],
-            "mode": "line",
-            "task_id": entry["task_id"],
-            "spin_polarized": str(spin_polarized),
-            "num_bands": str(num_bands),
-            "path_type": bs_type,
-            "efermi": str(efermi),
-            "min_energy": str(min_energy),
-            "max_energy": str(max_energy),
-            "num_uniq_elements": str(num_uniq_elements),
-            self.s3.last_updated_field: entry["last_updated"],
-        }
-
-        d_new = self.s3.write_doc_to_s3(
-            d,
-            search_keys=[
-                key
-                for key in d
-                if key
-                not in [
-                    "object",
-                    "spin_polarized",
-                    "num_bands",
-                    "efermi",
-                    "min_energy",
-                    "max_energy",
-                    "num_uniq_elements",
-                    self.s3.last_updated_field,
-                ]
-            ],
-        )
+            d = {
+                "gridfs_id": entry["gridfs_id"],
+                "object": entry["bs"],
+                "mode": mode,
+                "task_id": entry["task_id"],
+                "spin_polarized": spin_polarized,
+                "num_bands": num_bands,
+                "efermi": efermi,
+                "min_energy": min_energy,
+                "max_energy": max_energy,
+                "num_uniq_elements": num_uniq_elements,
+                self.s3.last_updated_field: entry["last_updated"],
+            }
 
         return d
 
@@ -823,12 +878,13 @@ class BSCopyBuilder(Builder):
 
         if len(items) > 0:
             self.logger.info("Uploading {} band structures".format(len(items)))
-            self.s3.update(items, key=[key for key in items[0] if key != "data"])
+            for item in items:
+                self.s3.update([item], key=[key for key in item if key != "object"])
         else:
             self.logger.info("No band structure to copy")
 
 
-class BSFileCopyBuilder(Builder):
+class BSFileCopyBuilder(Builder):  # THIS IS FOR COPYING TO MINIO ONLY. NEEDS WORK.
     def __init__(
         self, tasks, bandstructures, s3, meta_dir, target_dir, query=None, **kwargs
     ):
@@ -1036,3 +1092,4 @@ def calc_etag(input_data):
     for i in range(0, len(input_data), chunk_size):
         m.update(input_data[i : i + chunk_size])
     return m.hexdigest()
+
