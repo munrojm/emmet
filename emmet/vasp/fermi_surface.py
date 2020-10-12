@@ -4,6 +4,7 @@ from pymatgen.electronic_structure.bandstructure import BandStructure
 
 from ifermi.fermi_surface import FermiSurface
 from ifermi.interpolator import Interpolater
+from ifermi.plotter import FermiSurfacePlotter
 
 # pyfftw can improve performance:
 # pip install IFermi[decimation,smooth] pyfftw
@@ -141,15 +142,17 @@ class FermiSurfaceBuilder(Builder):
                     kpoint_dim,
                     mu=mu,
                     wigner_seitz=True,
-                    smooth=True,
+                    smooth=False,
                     decimate_factor=decimation_factor,
                 )
 
                 fermi_surfaces[mu] = fs.as_dict()
 
             d = {
-                "_".join(mu_labels[value].lower().split(" ")): fermi_surfaces[value]
-                for value in mu_values
+                "fermi_surfaces": [fermi_surfaces[value] for value in mu_values],
+                "surface_types": [
+                    "_".join(mu_labels[value].lower().split(" ")) for value in mu_values
+                ],
             }
 
             d.update(
