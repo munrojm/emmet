@@ -11,7 +11,6 @@ class SearchBuilder(Builder):
         grain_boundaries,
         bandstructure,
         dos,
-        electronic_structure,
         magnetism,
         elasticity,
         dielectric,
@@ -29,7 +28,6 @@ class SearchBuilder(Builder):
         self.grain_boundaries = grain_boundaries
         self.bandstructure = bandstructure
         self.dos = dos
-        self.electronic_structure = electronic_structure
         self.magnetism = magnetism
         self.elasticity = elasticity
         self.dielectric = dielectric
@@ -58,7 +56,7 @@ class SearchBuilder(Builder):
             **kwargs
         )
 
-        self.chunk_size = 5
+        self.chunk_size = 1
 
     def get_items(self):
         """
@@ -72,42 +70,60 @@ class SearchBuilder(Builder):
 
         q = dict(self.query)
 
-        mat_ids = self.materials.distinct(field="material_id", criteria=q)
-        search_ids = self.search.distinct(field="material_id", criteria=q)
+        mat_ids = self.materials.distinct(field="task_id", criteria=q)
+        search_ids = self.search.distinct(field="task_id", criteria=q)
+        thermo_ids = self.thermo.distinct(field="task_id", criteria=q)
 
-        search_set = set(mat_ids) - set(search_ids)
+        search_set = set(mat_ids).intersection(thermo_ids) - set(search_ids)
 
         search_list = [key for key in search_set]
 
-        self.logger.debug("Processing {} materials".format(len(search_list)))
+        split_size = 1000
 
-        self.total = len(search_list)
+        chunk_list = [
+            search_list[i : i + split_size]
+            for i in range(0, len(search_list), split_size)
+        ]
+        self.total = len(chunk_list)
 
-        for entry in search_list:
+        self.logger.debug(
+            "Processing {} materials in {} chunks".format(
+                len(search_list), len(chunk_list)
+            )
+        )
+
+        for entry in chunk_list:
+
+            query = {"$in": entry}
 
             data = {
-                "materials": self.materials.query_one({"material_id": entry}),
-                "thermo": self.thermo.query_one({"material_id": entry}),
-                "xas": list(self.xas.query({"task_id": entry})),
+                "materials": list(self.materials.query({self.materials.key: query})),
+                "thermo": list(self.thermo.query({self.thermo.key: query})),
+                "xas": list(self.xas.query({self.xas.key: query})),
                 "grain_boundaries": list(
-                    self.grain_boundaries.query({"task_id": entry})
+                    self.grain_boundaries.query({self.grain_boundaries.key: query})
                 ),
-                "bandstructure": self.bandstructure.query_one({"task_id": entry}),
-                "dos": self.dos.query_one({"task_id": entry}),
-                "magnetism": self.magnetism.query({"task_id": entry}),
-                "elasticity": self.elasticity.query({"task_id": entry}),
-                "dielectric": self.dielectric.query({"task_id": entry}),
-                "phonon": self.phonon.query({"task_id": entry}),
-                "surface_properties": self.surfaces.query_one({"task_id": entry}),
-                "eos": self.eos.query_one({"task_id": entry}, ["task_id"]),
+                "bandstructure": list(
+                    self.bandstructure.query({self.bandstructure.key: query})
+                ),
+                "dos": list(self.dos.query({self.dos.key: query})),
+                "magnetism": list(self.magnetism.query({self.magnetism.key: query})),
+                "elasticity": list(self.elasticity.query({self.elasticity.key: query})),
+                "dielectric": list(self.dielectric.query({self.dielectric.key: query})),
+                "phonon": list(
+                    self.phonon.query({self.phonon.key: query}, [self.phonon.key])
+                ),
+                "surface_properties": list(
+                    self.surfaces.query({self.surfaces.key: query})
+                ),
+                "eos": list(self.eos.query({self.eos.key: query}, [self.eos.key])),
             }
 
             yield data
 
     def process_item(self, item):
 
-        d = {}
-        d["has_props"] = []
+        d = defaultdict(dict)
 
         # Materials
 
@@ -122,142 +138,187 @@ class SearchBuilder(Builder):
             "chemsys",
             "volume",
             "density",
-            "density_atomic",
             "symmetry",
-            "material_id",
+            "task_id",
             "structure",
+            "deprecated",
         ]
 
-        for field in materials_fields:
-            d[field] = item["materials"][field]
+        ids = []
 
-        # Thermo
+        for doc in item["materials"]:
 
-        thermo_fields = [
-            "energy",
-            "energy_per_atom",
-            "formation_energy_per_atom",
-            "e_above_hull",
-            "is_stable",
-        ]
+            ids.append(doc[self.materials.key])
+            d[ids[-1]] = defaultdict(dict)
+            for field in materials_fields:
+                d[ids[-1]][field] = doc[field]
 
-        for field in thermo_fields:
-            d[field] = item["thermo"][field]
+        for id in ids:
 
-        # XAS
+            d[id]["has_props"] = []
 
-        xas_fields = ["absorbing_element", "edge", "spectrum_type", "xas_id"]
+            # Thermo
 
-        if item["xas"] != {}:
-            d["has_props"].append("xas")
-            d["xas"] = []
+            thermo_fields = [
+                "energy",
+                "energy_per_atom",
+                "formation_energy_per_atom",
+                "e_above_hull",
+                "is_stable",
+            ]
+
+            for doc in item["thermo"]:
+                if doc[self.thermo.key] == id:
+                    for field in thermo_fields:
+                        d[id][field] = doc["thermo"][field]
+
+            # XAS
+
+            xas_fields = ["absorbing_element", "edge", "spectrum_type", "xas_id"]
 
             for doc in item["xas"]:
-                d["xas"].append({field: doc[field] for field in xas_fields})
+                if doc[self.xas.key] == id:
 
-        # GB
+                    if d[id].get("xas", None) is None:
+                        d[id]["xas"] = []
 
-        gb_fields = ["gb_energy", "sigma", "type", "rotation_angle", "w_sep"]
+                    d[id]["has_props"].append("xas")
 
-        if item["grain_boundaries"] != {}:
-            d["has_props"].append("grain_boundaries")
-            d["grain_boundaries"] = []
+                    d[id]["xas"].append({field: doc[field] for field in xas_fields})
+
+            # GB
+
+            gb_fields = ["gb_energy", "sigma", "type", "rotation_angle", "w_sep"]
 
             for doc in item["grain_boundaries"]:
-                d["grain_boundaries"].append({field: doc[field] for field in gb_fields})
+                if doc[self.grain_boundaries.key] == id:
 
-        # Bandstructure
+                    if d[id].get("grain_boundaries", None) is None:
+                        d[id]["grain_boundaries"] = []
 
-        bandstructure_fields = [
-            "energy",
-            "direct",
-        ]
+                    d[id]["has_props"].append("grain_boundaries")
 
-        if item["bandstructure"] != {}:
-            d["has_props"].append("bandstructure")
-            for type in ["sc", "hin", "lm"]:
-                for field in bandstructure_fields:
-                    d["{}_{}".format(type, field)] = item["bandstructure"][type][
-                        "band_gap"
-                    ][field]
+                    d[id]["grain_boundaries"].append(
+                        {field: doc[field] for field in gb_fields}
+                    )
 
-        # DOS
+            # Bandstructure
 
-        if item["dos"] != {}:
-            d["has_props"].append("dos")
+            bandstructure_fields = [
+                "energy",
+                "direct",
+            ]
 
-            dos_bgap = item["dos"]["total"]["band_gap"]
+            for doc in item["bandstructure"]:
+                if doc[self.bandstructure.key] == id:
+                    d[id]["has_props"].append("bandstructure")
+                    for type in ["sc", "hin", "lm"]:
+                        for field in bandstructure_fields:
+                            e = doc[type].get("band_gap", None).get(field, None)
+                            if e is not None:
+                                d[id]["{}_{}".format(type, field)] = e
+            # DOS
 
-            for entry in dos_bgap:
-                d["dos_energy_{}".format(entry)] = dos_bgap[entry]
-                if int(entry) == -1:
-                    d["spin_polarized"] = True
+            for doc in item["dos"]:
+                if doc[self.dos.key] == id:
+                    d[id]["has_props"].append("dos")
 
-        # Elasticity
+                    dos_bgap = doc["total"]["band_gap"]
 
-        elasticity_fields = [
-            "k_voigt",
-            "k_reuss",
-            "k_vrh",
-            "g_voigt",
-            "g_reuss",
-            "g_vrh",
-            "universal_anisotropy",
-            "homogenenous_poisson",
-        ]
+                    for entry in dos_bgap:
+                        d[id]["dos_energy_{}".format(entry)] = dos_bgap[entry]
+                        if int(entry) == -1:
+                            d[id]["spin_polarized"] = True
 
-        if item["elasticity"] != {}:
-            d["has_props"].append["elasticity"]
+            # Magnetism
 
-            for field in elasticity_fields:
-                d[field] = item["elasticity"]["elasticity"][field]
+            magnetism_fields = [
+                "ordering",
+                "total_magnetization",
+                "total_magnetization_normalized_vol",
+                "total_magnetization_normalized_formula_units",
+            ]
 
-        # Dielectric
+            for doc in item["magnetism"]:
+                if doc[self.magnetism.key] == id:
+                    d[id]["has_props"].append("magnetism")
 
-        dielectric_fields = [
-            "e_total",
-            "e_ionic",
-            "e_static",
-            "n",
-        ]
+                    d[id]["spin_polarized"] = True
 
-        if item["dielectric"] != {}:
-            if item["dielectric"].get("dielectric", None) is not None:
-                d["has_props"].append("dielectric")
+                    for field in magnetism_fields:
+                        d[id][field] = doc["magnetism"][field]
 
-                for field in dielectric_fields:
-                    d[field] = item["dielectric"]["dielectric"][field]
+            # Elasticity
 
-        # Piezo
+            elasticity_fields = [
+                "k_voigt",
+                "k_reuss",
+                "k_vrh",
+                "g_voigt",
+                "g_reuss",
+                "g_vrh",
+                "universal_anisotropy",
+                "homogeneous_poisson",
+            ]
 
-        piezo_fields = ["e_ij_max"]
+            for doc in item["elasticity"]:
+                if doc[self.elasticity.key] == id:
+                    d[id]["has_props"].append("elasticity")
 
-        if item["dielectric"] != {}:
-            if item["dielectric"].get("piezo", None) is not None:
-                d["has_props"].append("piezoelectric")
+                    for field in elasticity_fields:
+                        d[id][field] = doc["elasticity"][field]
 
-                for field in piezo_fields:
-                    d[field] = item["dielectric"]["piezo"][field]
+            # Dielectric and Piezo
 
-        # Surface properties
+            dielectric_fields = [
+                "e_total",
+                "e_ionic",
+                "e_static",
+                "n",
+            ]
 
-        surface_fields = [
-            "weighted_surface_energy",
-            "weighted_surface_energy_EV_PER_ANG2",
-            "shape_factor",
-            "surface_anisotropy",
-        ]
+            piezo_fields = ["e_ij_max"]
 
-        if item["surfaces_properties"] != {}:
-            d["has_props"].append("surface_properties")
+            for doc in item["dielectric"]:
+                if doc[self.dielectric.key] == id:
+                    check_dielectric = doc.get("dielectric", None)
+                    check_piezo = doc.get("piezo", None)
+                    if check_dielectric is not None and check_dielectric != {}:
+                        d[id]["has_props"].append("dielectric")
 
-            for field in surface_fields:
-                d[field] = item["surface_properties"][field]
+                        for field in dielectric_fields:
+                            d[id][field] = doc["dielectric"][field]
 
-        # EOS
+                    if check_piezo is not None and check_piezo != {}:
+                        d[id]["has_props"].append("piezoelectric")
 
-        if item["eos"] != {}:
-            d["has_props"].append("eos")
+                        for field in piezo_fields:
+                            d[id][field] = doc["piezo"][field]
+
+            # Surface properties
+
+            surface_fields = [
+                "weighted_surface_energy",
+                "weighted_surface_energy_EV_PER_ANG2",
+                "shape_factor",
+                "surface_anisotropy",
+            ]
+
+            for doc in item["surface_properties"]:
+                if doc[self.surfaces.key] == id:
+                    d[id]["has_props"].append("surface_properties")
+
+                    for field in surface_fields:
+                        d[id][field] = doc[field]
+
+            # EOS
+
+            for doc in item["eos"]:
+
+                if doc[self.eos.key] == id:
+                    d[id]["has_props"].append("eos")
+
+            d[id]["has_props"] = list(set(d[id]["has_props"]))
 
         return d
 
@@ -271,8 +332,10 @@ class SearchBuilder(Builder):
         items = list(filter(None, items))
 
         if len(items) > 0:
-            self.logger.info("Inserting {} search docs".format(len(items)))
-
-            self.search.update(items, key=self.search.key)
+            self.logger.info(
+                "Inserting {} search docs".format(len(list(items[0].keys())))
+            )
+            for key, doc in items[0].items():
+                self.search.update(doc, key=self.search.key)
         else:
             self.logger.info("No search entries to copy")
