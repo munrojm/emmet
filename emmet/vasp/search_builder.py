@@ -70,7 +70,9 @@ class SearchBuilder(Builder):
 
         q = dict(self.query)
 
-        mat_ids = self.materials.distinct(field="task_id", criteria=q)
+        sbox_q = {"_sbxn": "core"}
+
+        mat_ids = self.materials.distinct(field="task_id", criteria={**q, **sbox_q})
         search_ids = self.search.distinct(field="task_id", criteria=q)
         thermo_ids = self.thermo.distinct(field="task_id", criteria=q)
 
@@ -78,7 +80,7 @@ class SearchBuilder(Builder):
 
         search_list = [key for key in search_set]
 
-        split_size = 1000
+        split_size = 200
 
         chunk_list = [
             search_list[i : i + split_size]
@@ -172,6 +174,15 @@ class SearchBuilder(Builder):
                     for field in thermo_fields:
                         d[id][field] = doc["thermo"][field]
 
+                    d[id]["corrected_energy"] = doc["thermo"]["explanation"][
+                        "corrected_energy"
+                    ]
+
+                    try:
+                        d[id]["eq_reaction_e"] = doc["thermo"]["eq_reaction_e"]
+                    except KeyError:
+                        pass
+
             # XAS
 
             xas_fields = ["absorbing_element", "edge", "spectrum_type", "xas_id"]
@@ -226,9 +237,12 @@ class SearchBuilder(Builder):
                     dos_bgap = doc["total"]["band_gap"]
 
                     for entry in dos_bgap:
-                        d[id]["dos_energy_{}".format(entry)] = dos_bgap[entry]
                         if int(entry) == -1:
-                            d[id]["spin_polarized"] = True
+                            spin = "down"
+                        else:
+                            spin = "up"
+
+                        d[id]["dos_energy_{}".format(spin)] = dos_bgap[entry]
 
             # Magnetism
 
