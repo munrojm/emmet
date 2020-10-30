@@ -257,6 +257,8 @@ class SearchBuilder(Builder):
                 "total_magnetization_normalized_formula_units",
             ]
 
+            d[id]["spin_polarized"] = False
+
             for doc in item["magnetism"]:
                 if doc[self.magnetism.key] == id:
                     d[id]["has_props"].append("magnetism")
