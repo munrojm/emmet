@@ -334,6 +334,15 @@ class SearchBuilder(Builder):
 
             d[id]["has_props"] = list(set(d[id]["has_props"]))
 
+            # Phonon
+
+            for doc in item["phonon"]:
+
+                if doc[self.phonon.key] == id:
+                    d[id]["has_props"].append("phonon")
+
+            d[id]["has_props"] = list(set(d[id]["has_props"]))
+
         return d
 
     def update_targets(self, items):
