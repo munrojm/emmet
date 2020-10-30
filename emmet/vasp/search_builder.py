@@ -15,6 +15,7 @@ class SearchBuilder(Builder):
         elasticity,
         dielectric,
         phonon,
+        substrates,
         surfaces,
         eos,
         search,
@@ -32,6 +33,7 @@ class SearchBuilder(Builder):
         self.elasticity = elasticity
         self.dielectric = dielectric
         self.phonon = phonon
+        self.substrates = substrates
         self.surfaces = surfaces
         self.eos = eos
         self.search = search
@@ -50,6 +52,7 @@ class SearchBuilder(Builder):
                 dielectric,
                 phonon,
                 surfaces,
+                substrates,
                 eos,
             ],
             targets=[search],
@@ -118,6 +121,7 @@ class SearchBuilder(Builder):
                 "surface_properties": list(
                     self.surfaces.query({self.surfaces.key: query})
                 ),
+                "substrates": list(self.surfaces.query({self.substrates.key: query})),
                 "eos": list(self.eos.query({self.eos.key: query}, [self.eos.key])),
             }
 
@@ -340,6 +344,15 @@ class SearchBuilder(Builder):
 
                 if doc[self.phonon.key] == id:
                     d[id]["has_props"].append("phonon")
+
+            d[id]["has_props"] = list(set(d[id]["has_props"]))
+
+            # Substrates
+
+            for doc in item["substrates"]:
+
+                if doc[self.substrates.key] == id:
+                    d[id]["has_props"].append("substrates")
 
             d[id]["has_props"] = list(set(d[id]["has_props"]))
 
